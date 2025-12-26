@@ -1,83 +1,77 @@
 /*
-   VladiksLED - Простой дебаг проект
-   Белый огонек бегает от первого до последнего светодиода и обратно
+   VladiksLED - OTA Debug Mode
 */
 
-#include <FastLED.h>
+#include <ESP8266WiFi.h>
+#include <ArduinoOTA.h>
 
-// Настройки
-#define LED_PIN       4           // Пин для подключения ленты (GPIO 4 = D2 на D1 Mini). GPIO 6 (SD_CLK) нельзя использовать!
-#define NUM_LEDS      50          // Количество светодиодов
-#define BRIGHTNESS    100         // Яркость (0-255)
-#define SPEED         50          // Скорость движения (меньше = быстрее, мс)
-const bool ENABLE_BLINK = true;   // Включить мерцание встроенным светодиодом
+// Настройки WiFi
+const char* ssid = "TP-LINK_8E7C38";
+const char* password = "877746046333";
 
-// Возможные пины встроенного светодиода для разных плат
-int builtinLedPins[] = {LED_BUILTIN, 13, 2, 16, 1, 3, 5};
-int numBuiltinPins = sizeof(builtinLedPins) / sizeof(builtinLedPins[0]);
-int currentPinIndex = 0;
-int blinkCounter = 0;
+IPAddress local_IP(192, 168, 1, 222);
+IPAddress gateway(192, 168, 1, 1);
+IPAddress subnet(255, 255, 255, 0);
 
-CRGB leds[NUM_LEDS];
-
-int position = 0;           // Текущая позиция светодиода
-int direction = 1;          // Направление движения (1 = вперед, -1 = назад)
+unsigned long previousMillis = 0;
+const long interval = 1000;
 
 void setup() {
-  // Инициализация FastLED
-  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
-  FastLED.setBrightness(BRIGHTNESS);
-  FastLED.clear();
-  FastLED.show();
+  Serial.begin(115200);
+  Serial.println("\n\nBooting VladiksLED...");
   
-  // Инициализируем все возможные пины встроенного светодиода
-  if (ENABLE_BLINK) {
-    for (int i = 0; i < numBuiltinPins; i++) {
-      pinMode(builtinLedPins[i], OUTPUT);
-      digitalWrite(builtinLedPins[i], LOW);
-    }
+  WiFi.mode(WIFI_STA);
+  WiFi.config(local_IP, gateway, subnet); 
+  WiFi.begin(ssid, password);
+  
+  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    Serial.println("Connection Failed! Rebooting...");
+    delay(5000);
+    ESP.restart();
   }
+
+  ArduinoOTA.setHostname("VladiksLED");
+  
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_FS
+      type = "filesystem";
+    }
+    Serial.println("Start updating " + type);
+  });
+  
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+  ArduinoOTA.begin();
+  
+  Serial.println("Ready");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
 }
 
 void loop() {
-  // Очистка всех светодиодов
-  FastLED.clear();
+  ArduinoOTA.handle();
   
-  // Включаем белый светодиод на текущей позиции
-  leds[position] = CRGB::White;
-  
-  // Обновляем ленту
-  FastLED.show();
-  
-  // Мигаем встроенным светодиодом (перебираем все пины)
-  // Каждые 20 миганий переключаемся на следующий пин
-  if (ENABLE_BLINK) {
-    bool blinkState = (blinkCounter % 2 == 0);
-    for (int i = 0; i < numBuiltinPins; i++) {
-      if (i == currentPinIndex) {
-        digitalWrite(builtinLedPins[i], blinkState ? HIGH : LOW);
-      } else {
-        digitalWrite(builtinLedPins[i], LOW);
-      }
-    }
-    
-    blinkCounter++;
-    if (blinkCounter >= 40) {  // Через 40 миганий (20 полных циклов) переходим к следующему пину
-      blinkCounter = 0;
-      currentPinIndex = (currentPinIndex + 1) % numBuiltinPins;
-    }
-  }
-  
-  // Задержка для контроля скорости
-  delay(SPEED);
-  
-  // Двигаем позицию
-  position += direction;
-  
-  // Проверяем границы и меняем направление
-  if (position >= NUM_LEDS - 1) {
-    direction = -1;  // Разворот назад
-  } else if (position <= 0) {
-    direction = 1;   // Разворот вперед
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+    Serial.println("I am alive! AND IT WORKS! OTA is waiting...");
   }
 }
