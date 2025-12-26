@@ -1,0 +1,14 @@
+# PlatformIO
+.pio/
+
+# VS Code
+.vscode/
+!.vscode/extensions.json
+# Uncomment the below if you want to share these configurations
+# !.vscode/launch.json
+# !.vscode/tasks.json
+# !.vscode/c_cpp_properties.json
+
+# OS specific
+.DS_Store
+Thumbs.db
