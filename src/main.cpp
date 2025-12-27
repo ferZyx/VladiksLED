@@ -1,11 +1,14 @@
-/*
-   VladiksLED - OTA Debug Mode
-*/
-
 #include <ESP8266WiFi.h>
 #include <ArduinoOTA.h>
+#include <FastLED.h>
 
-// Настройки WiFi
+// LED Settings
+#define LED_PIN D4
+#define NUM_LEDS 99
+
+CRGB leds[NUM_LEDS];
+
+// WiFi Settings
 const char* ssid = "TP-LINK_8E7C38";
 const char* password = "877746046333";
 
@@ -13,12 +16,15 @@ IPAddress local_IP(192, 168, 1, 222);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-unsigned long previousMillis = 0;
-const long interval = 1000;
-
 void setup() {
   Serial.begin(115200);
   Serial.println("\n\nBooting VladiksLED...");
+
+  // FastLED setup
+  FastLED.addLeds<WS2812, LED_PIN, BGR>(leds, NUM_LEDS);
+  FastLED.setBrightness(50); // Set a reasonable brightness
+  FastLED.clear();
+  FastLED.show();
   
   WiFi.mode(WIFI_STA);
   WiFi.config(local_IP, gateway, subnet); 
@@ -40,6 +46,9 @@ void setup() {
       type = "filesystem";
     }
     Serial.println("Start updating " + type);
+    // Turn off LEDs during update
+    FastLED.clear();
+    FastLED.show();
   });
   
   ArduinoOTA.onEnd([]() {
@@ -69,9 +78,10 @@ void setup() {
 void loop() {
   ArduinoOTA.handle();
   
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= interval) {
-    previousMillis = currentMillis;
-    Serial.println("I am alive! AND IT WORKS! OTA is waiting...");
-  }
+  // Simple rainbow effect
+  static uint8_t hue = 0;
+  fill_rainbow(leds, NUM_LEDS, hue, 7);
+  FastLED.show();
+  hue++;
+  delay(20);
 }
