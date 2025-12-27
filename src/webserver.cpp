@@ -1,9 +1,26 @@
 #include "webserver.h"
 #include "webpage.h"
 #include "config.h"
+#include "logger.h"
 #include <ArduinoJson.h>
+#include <ESP8266WiFi.h>
 
-ESP8266WebServer server(WEB_SERVER_PORT);
+// Define HTTP method constants if not defined
+#ifndef HTTP_ANY
+#define HTTP_ANY 0xFF
+#endif
+#ifndef HTTP_GET
+#define HTTP_GET 0x01
+#endif
+#ifndef HTTP_POST
+#define HTTP_POST 0x02
+#endif
+#ifndef HTTP_DELETE
+#define HTTP_DELETE 0x04
+#endif
+
+AsyncWebServer server(WEB_SERVER_PORT);
+AsyncWebSocket ws(LOG_WEBSOCKET_PATH);
 
 // Throttle защита
 unsigned long lastRequestTime = 0;
@@ -17,43 +34,80 @@ bool checkThrottle() {
   return true;
 }
 
+// WebSocket event handler
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
+               void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    LOG_PRINTF("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+    
+    // Отправляем историю логов новому клиенту
+    String history = logger.getBufferAsJson();
+    client->text("{\"type\":\"history\",\"logs\":" + history + "}");
+    
+  } else if (type == WS_EVT_DISCONNECT) {
+    LOG_PRINTF("WebSocket client #%u disconnected\n", client->id());
+    
+  } else if (type == WS_EVT_ERROR) {
+    LOG_PRINTF("WebSocket client #%u error(%u): %s\n", client->id(), *((uint16_t*)arg), (char*)data);
+    
+  } else if (type == WS_EVT_DATA) {
+    // Обработка входящих сообщений от клиента (если нужно)
+    AwsFrameInfo *info = (AwsFrameInfo*)arg;
+    if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+      data[len] = 0;
+      LOG_PRINTF("WebSocket message from client #%u: %s\n", client->id(), (char*)data);
+    }
+  }
+}
+
 void setupWebServer() {
-  // Главная страница
-  server.on("/", HTTP_GET, handleRoot);
+  // Настройка WebSocket
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
+  logger.setWebSocket(&ws);
   
-  // API endpoints
+  // Главная страница
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", WEBPAGE);
+  });
+  
+  // API endpoints - GET requests
   server.on("/api/state", HTTP_GET, handleGetState);
-  server.on("/api/power", HTTP_POST, handleSetPower);
-  server.on("/api/brightness", HTTP_POST, handleSetBrightness);
-  server.on("/api/leds", HTTP_POST, handleSetLEDs);
-  server.on("/api/mode", HTTP_POST, handleSetMode);
   server.on("/api/mode/settings/get", HTTP_GET, handleGetModeSettings);
-  server.on("/api/mode/settings", HTTP_POST, handleSetModeSettings);
-  server.on("/api/mode/reset", HTTP_POST, handleResetModeSettings);
-  server.on("/api/mode/archive", HTTP_POST, handleToggleModeArchive);
-  server.on("/api/auto-switch", HTTP_POST, handleSetAutoSwitch);
   server.on("/api/schedules", HTTP_GET, handleGetSchedules);
-  server.on("/api/schedules", HTTP_POST, handleSetSchedule);
-  server.on("/api/schedules", HTTP_DELETE, handleDeleteSchedule);
   server.on("/api/time", HTTP_GET, handleGetTime);
-  server.on("/api/time/set", HTTP_POST, handleSetTime);
   server.on("/api/debug", HTTP_GET, handleGetDebug);
   
-  server.onNotFound(handleNotFound);
+  // API endpoints - POST requests with body
+  server.on("/api/power", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetPower);
+  server.on("/api/brightness", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetBrightness);
+  server.on("/api/leds", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetLEDs);
+  server.on("/api/mode", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetMode);
+  server.on("/api/mode/settings", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetModeSettings);
+  server.on("/api/mode/reset", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleResetModeSettings);
+  server.on("/api/mode/archive", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleToggleModeArchive);
+  server.on("/api/auto-switch", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetAutoSwitch);
+  server.on("/api/schedules", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetSchedule);
+  server.on("/api/time/set", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetTime);
+  
+  // DELETE request
+  server.on("/api/schedules", HTTP_DELETE, handleDeleteSchedule);
+  
+  server.onNotFound([](AsyncWebServerRequest *request){
+    request->send(404, "text/plain", "Not Found");
+  });
   
   server.begin();
-  Serial.println("HTTP server started");
+  LOG_PRINTLN("HTTP server started");
 }
 
 void handleWebServer() {
-  server.handleClient();
+  // AsyncWebServer обрабатывает запросы автоматически
+  // Нужно только очищать WebSocket клиентов
+  ws.cleanupClients();
 }
 
-void handleRoot() {
-  server.send_P(200, "text/html", WEBPAGE);
-}
-
-void handleGetState() {
+void handleGetState(AsyncWebServerRequest *request) {
   DynamicJsonDocument doc(8192);
   
   doc["power"] = ledState.power;
@@ -76,141 +130,131 @@ void handleGetState() {
   String response;
   serializeJson(doc, response);
   
-  server.send(200, "application/json", response);
+  request->send(200, "application/json", response);
 }
 
-void handleSetPower() {
+void handleSetPower(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
   
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    
-    if (!error) {
-      ledState.power = doc["on"];
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error) {
+    ledState.power = doc["on"];
+    saveLEDState();
+    request->send(200, "application/json", "{\"success\":true}");
+    return;
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleSetBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error) {
+    ledState.brightness = doc["value"];
+    saveLEDState();
+    request->send(200, "application/json", "{\"success\":true}");
+    return;
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleSetLEDs(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error) {
+    uint16_t count = doc["count"];
+    if (count > 0 && count <= MAX_LEDS) {
+      ledState.numLeds = count;
       saveLEDState();
-      server.send(200, "application/json", "{\"success\":true}");
+      request->send(200, "application/json", "{\"success\":true}");
       return;
     }
   }
   
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
 }
 
-void handleSetBrightness() {
+void handleSetMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
   
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    
-    if (!error) {
-      ledState.brightness = doc["value"];
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error) {
+    uint8_t mode = doc["mode"];
+    if (mode < TOTAL_MODES) {
+      ledState.currentMode = mode;
       saveLEDState();
-      server.send(200, "application/json", "{\"success\":true}");
+      request->send(200, "application/json", "{\"success\":true}");
       return;
     }
   }
   
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
 }
 
-void handleSetLEDs() {
+void handleSetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
   
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    
-    if (!error) {
-      uint16_t count = doc["count"];
-      if (count > 0 && count <= MAX_LEDS) {
-        ledState.numLeds = count;
-        saveLEDState();
-        server.send(200, "application/json", "{\"success\":true}");
-        return;
-      }
-    }
-  }
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
   
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
-}
-
-void handleSetMode() {
-  if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
-  
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    
-    if (!error) {
-      uint8_t mode = doc["mode"];
-      if (mode < TOTAL_MODES) {
-        ledState.currentMode = mode;
-        saveLEDState();
-        server.send(200, "application/json", "{\"success\":true}");
-        return;
-      }
-    }
-  }
-  
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
-}
-
-void handleSetModeSettings() {
-  if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
-  
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<512> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    
-    if (!error && doc.containsKey("modeId")) {
-      int modeId = doc["modeId"];
-      
-      if (modeId < 0 || modeId >= TOTAL_MODES) {
-        server.send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
-        return;
-      }
-      
-      if (doc.containsKey("speed")) {
-        ledState.modeSettings[modeId].speed = doc["speed"];
-      }
-      if (doc.containsKey("scale")) {
-        ledState.modeSettings[modeId].scale = doc["scale"];
-      }
-      if (doc.containsKey("brightness")) {
-        ledState.modeSettings[modeId].brightness = doc["brightness"];
-      }
-      saveLEDState();
-      server.send(200, "application/json", "{\"success\":true}");
-      return;
-    }
-  }
-  
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
-}
-
-void handleGetModeSettings() {
-  if (server.hasArg("modeId")) {
-    int modeId = server.arg("modeId").toInt();
+  if (!error && doc.containsKey("modeId")) {
+    int modeId = doc["modeId"];
     
     if (modeId < 0 || modeId >= TOTAL_MODES) {
-      server.send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
+      request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
+      return;
+    }
+    
+    if (doc.containsKey("speed")) {
+      ledState.modeSettings[modeId].speed = doc["speed"];
+    }
+    if (doc.containsKey("scale")) {
+      ledState.modeSettings[modeId].scale = doc["scale"];
+    }
+    if (doc.containsKey("brightness")) {
+      ledState.modeSettings[modeId].brightness = doc["brightness"];
+    }
+    saveLEDState();
+    request->send(200, "application/json", "{\"success\":true}");
+    return;
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleGetModeSettings(AsyncWebServerRequest *request) {
+  if (request->hasParam("modeId")) {
+    int modeId = request->getParam("modeId")->value().toInt();
+    
+    if (modeId < 0 || modeId >= TOTAL_MODES) {
+      request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
       return;
     }
     
@@ -222,98 +266,92 @@ void handleGetModeSettings() {
     
     String response;
     serializeJson(doc, response);
-    server.send(200, "application/json", response);
+    request->send(200, "application/json", response);
     return;
   }
   
-  server.send(400, "application/json", "{\"error\":\"Missing modeId parameter\"}");
+  request->send(400, "application/json", "{\"error\":\"Missing modeId parameter\"}");
 }
 
-void handleResetModeSettings() {
+void handleResetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
   
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error && doc.containsKey("modeId")) {
+    int modeId = doc["modeId"];
     
-    if (!error && doc.containsKey("modeId")) {
-      int modeId = doc["modeId"];
-      
-      if (modeId < 0 || modeId >= TOTAL_MODES) {
-        server.send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
-        return;
-      }
-      
-      // Reset to default values
-      ledState.modeSettings[modeId].speed = 128;
-      ledState.modeSettings[modeId].scale = 128;
-      ledState.modeSettings[modeId].brightness = 255;
-      // Don't reset archived status or colors
-      
-      saveLEDState();
-      server.send(200, "application/json", "{\"success\":true}");
+    if (modeId < 0 || modeId >= TOTAL_MODES) {
+      request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
       return;
     }
-  }
-  
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
-}
-
-void handleToggleModeArchive() {
-  if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    
+    // Reset to default values
+    ledState.modeSettings[modeId].speed = 128;
+    ledState.modeSettings[modeId].scale = 128;
+    ledState.modeSettings[modeId].brightness = 255;
+    // Don't reset archived status or colors
+    
+    saveLEDState();
+    request->send(200, "application/json", "{\"success\":true}");
     return;
   }
   
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    
-    if (!error && doc.containsKey("modeId")) {
-      int modeId = doc["modeId"];
-      
-      if (modeId < 0 || modeId >= TOTAL_MODES) {
-        server.send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
-        return;
-      }
-      
-      bool archived = doc["archived"];
-      ledState.modeSettings[modeId].archived = archived;
-      saveLEDState();
-      server.send(200, "application/json", "{\"success\":true}");
-      return;
-    }
-  }
-  
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
 }
 
-void handleSetAutoSwitch() {
+void handleToggleModeArchive(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
   
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error && doc.containsKey("modeId")) {
+    int modeId = doc["modeId"];
     
-    if (!error) {
-      ledState.autoSwitchDelay = doc["delay"];
-      ledState.randomOrder = doc["random"];
-      saveLEDState();
-      server.send(200, "application/json", "{\"success\":true}");
+    if (modeId < 0 || modeId >= TOTAL_MODES) {
+      request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
       return;
     }
+    
+    bool archived = doc["archived"];
+    ledState.modeSettings[modeId].archived = archived;
+    saveLEDState();
+    request->send(200, "application/json", "{\"success\":true}");
+    return;
   }
   
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
 }
 
-void handleGetSchedules() {
+void handleSetAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error) {
+    ledState.autoSwitchDelay = doc["delay"];
+    ledState.randomOrder = doc["random"];
+    saveLEDState();
+    request->send(200, "application/json", "{\"success\":true}");
+    return;
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleGetSchedules(AsyncWebServerRequest *request) {
   DynamicJsonDocument doc(2048);
   
   JsonArray schedules = doc.createNestedArray("schedules");
@@ -329,63 +367,61 @@ void handleGetSchedules() {
   
   String response;
   serializeJson(doc, response);
-  server.send(200, "application/json", response);
+  request->send(200, "application/json", response);
 }
 
-void handleSetSchedule() {
+void handleSetSchedule(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
   
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<512> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
-    
-    if (!error && doc.containsKey("id")) {
-      int id = doc["id"];
-      
-      if (id < 0 || id >= MAX_SCHEDULES) {
-        server.send(400, "application/json", "{\"error\":\"Invalid schedule ID\"}");
-        return;
-      }
-      
-      if (doc.containsKey("enabled")) {
-        ledState.schedules[id].enabled = doc["enabled"];
-      }
-      if (doc.containsKey("hour")) {
-        ledState.schedules[id].hour = doc["hour"];
-      }
-      if (doc.containsKey("minute")) {
-        ledState.schedules[id].minute = doc["minute"];
-      }
-      if (doc.containsKey("action")) {
-        ledState.schedules[id].action = doc["action"];
-      }
-      if (doc.containsKey("daysOfWeek")) {
-        ledState.schedules[id].daysOfWeek = doc["daysOfWeek"];
-      }
-      
-      saveLEDState();
-      server.send(200, "application/json", "{\"success\":true}");
-      return;
-    }
-  }
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
   
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
-}
-
-void handleDeleteSchedule() {
-  if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
-  
-  if (server.hasArg("id")) {
-    int id = server.arg("id").toInt();
+  if (!error && doc.containsKey("id")) {
+    int id = doc["id"];
     
     if (id < 0 || id >= MAX_SCHEDULES) {
-      server.send(400, "application/json", "{\"error\":\"Invalid schedule ID\"}");
+      request->send(400, "application/json", "{\"error\":\"Invalid schedule ID\"}");
+      return;
+    }
+    
+    if (doc.containsKey("enabled")) {
+      ledState.schedules[id].enabled = doc["enabled"];
+    }
+    if (doc.containsKey("hour")) {
+      ledState.schedules[id].hour = doc["hour"];
+    }
+    if (doc.containsKey("minute")) {
+      ledState.schedules[id].minute = doc["minute"];
+    }
+    if (doc.containsKey("action")) {
+      ledState.schedules[id].action = doc["action"];
+    }
+    if (doc.containsKey("daysOfWeek")) {
+      ledState.schedules[id].daysOfWeek = doc["daysOfWeek"];
+    }
+    
+    saveLEDState();
+    request->send(200, "application/json", "{\"success\":true}");
+    return;
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleDeleteSchedule(AsyncWebServerRequest *request) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  if (request->hasParam("id")) {
+    int id = request->getParam("id")->value().toInt();
+    
+    if (id < 0 || id >= MAX_SCHEDULES) {
+      request->send(400, "application/json", "{\"error\":\"Invalid schedule ID\"}");
       return;
     }
     
@@ -393,14 +429,14 @@ void handleDeleteSchedule() {
     ledState.schedules[id].enabled = false;
     saveLEDState();
     
-    server.send(200, "application/json", "{\"success\":true}");
+    request->send(200, "application/json", "{\"success\":true}");
     return;
   }
   
-  server.send(400, "application/json", "{\"error\":\"Missing id parameter\"}");
+  request->send(400, "application/json", "{\"error\":\"Missing id parameter\"}");
 }
 
-void handleGetTime() {
+void handleGetTime(AsyncWebServerRequest *request) {
   time_t now = time(nullptr);
   struct tm timeinfo;
   localtime_r(&now, &timeinfo);
@@ -419,38 +455,36 @@ void handleGetTime() {
   
   String response;
   serializeJson(doc, response);
-  server.send(200, "application/json", response);
+  request->send(200, "application/json", response);
 }
 
-void handleSetTime() {
+void handleSetTime(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   if (!checkThrottle()) {
-    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
   
-  if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
-    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error && doc.containsKey("timestamp")) {
+    time_t timestamp = doc["timestamp"];
     
-    if (!error && doc.containsKey("timestamp")) {
-      time_t timestamp = doc["timestamp"];
-      
-      // Устанавливаем время на ESP8266
-      timeval tv = { timestamp, 0 };
-      settimeofday(&tv, nullptr);
-      
-      Serial.print("⏰ Time set manually to: ");
-      Serial.println(timestamp);
-      
-      server.send(200, "application/json", "{\"success\":true}");
-      return;
-    }
+    // Устанавливаем время на ESP8266
+    timeval tv = { timestamp, 0 };
+    settimeofday(&tv, nullptr);
+    
+    LOG_PRINT("⏰ Time set manually to: ");
+    LOG_PRINTLN(String(timestamp));
+    
+    request->send(200, "application/json", "{\"success\":true}");
+    return;
   }
   
-  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
 }
 
-void handleGetDebug() {
+void handleGetDebug(AsyncWebServerRequest *request) {
   DynamicJsonDocument doc(1024);
   
   // NTP info
@@ -486,9 +520,5 @@ void handleGetDebug() {
   
   String response;
   serializeJson(doc, response);
-  server.send(200, "application/json", response);
-}
-
-void handleNotFound() {
-  server.send(404, "text/plain", "Not Found");
+  request->send(200, "application/json", response);
 }

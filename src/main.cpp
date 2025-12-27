@@ -9,6 +9,7 @@
 #include "led_state.h"
 #include "led_modes.h"
 #include "webserver.h"
+#include "logger.h"
 
 // Авто-переключение режимов
 unsigned long lastModeSwitch = 0;
@@ -21,7 +22,7 @@ bool syncTimeViaHTTP() {
   WiFiClient client;
   HTTPClient http;
   
-  Serial.println("🌐 Fetching time via HTTP API...");
+  LOG_PRINTLN("🌐 Fetching time via HTTP API...");
   
   // Используем worldtimeapi.org для получения времени
   // Timezone: Asia/Yekaterinburg (UTC+5)
@@ -47,16 +48,16 @@ bool syncTimeViaHTTP() {
         timeval tv = { timestamp, 0 };
         settimeofday(&tv, nullptr);
         
-        Serial.print("✅ Time synced via HTTP: ");
-        Serial.println(timestamp);
+        LOG_PRINT("✅ Time synced via HTTP: ");
+        LOG_PRINTLN(String(timestamp));
         
         http.end();
         return true;
       }
     }
   } else {
-    Serial.print("❌ HTTP request failed: ");
-    Serial.println(httpCode);
+    LOG_PRINT("❌ HTTP request failed: ");
+    LOG_PRINTLN(String(httpCode));
   }
   
   http.end();
@@ -65,7 +66,7 @@ bool syncTimeViaHTTP() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n\n🎄 WiFi LED Garland Starting...");
+  LOG_PRINTLN("\n\n🎄 WiFi LED Garland Starting...");
   
   // Инициализация LED state
   initLEDState();
@@ -75,8 +76,8 @@ void setup() {
   initLEDs();
   
   // Подключение к WiFi
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(WIFI_SSID);
+  LOG_PRINT("Connecting to WiFi: ");
+  LOG_PRINTLN(WIFI_SSID);
   
   WiFi.mode(WIFI_STA);
   
@@ -87,7 +88,7 @@ void setup() {
   IPAddress subnet(SUBNET_MASK);
   
   if (!WiFi.config(local_IP, gateway, subnet)) {
-    Serial.println("Failed to configure static IP");
+    LOG_PRINTLN("Failed to configure static IP");
   }
 #endif
   
@@ -97,7 +98,7 @@ void setup() {
   int dotCount = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
+    LOG_PRINT(".");
     
     // Бегущий огонёк во время подключения
     FastLED.clear();
@@ -107,8 +108,8 @@ void setup() {
     
     // Таймаут 30 секунд
     if (dotCount > 60) {
-      Serial.println("\n❌ WiFi connection failed!");
-      Serial.println("Please check WIFI_SSID and WIFI_PASSWORD in config.h");
+      LOG_PRINTLN("\n❌ WiFi connection failed!");
+      LOG_PRINTLN("Please check WIFI_SSID and WIFI_PASSWORD in config.h");
       
       // Красная вспышка - ошибка
       fill_solid(leds, ledState.numLeds, CRGB::Red);
@@ -119,9 +120,9 @@ void setup() {
     }
   }
   
-  Serial.println("\n✅ WiFi connected!");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  LOG_PRINTLN("\n✅ WiFi connected!");
+  LOG_PRINT("IP address: ");
+  LOG_PRINTLN(WiFi.localIP().toString());
   
   // Зелёная вспышка - успех
   fill_solid(leds, ledState.numLeds, CRGB::Green);
@@ -131,45 +132,45 @@ void setup() {
   FastLED.show();
   
   // Инициализация NTP через встроенные функции ESP8266
-  Serial.println("🕐 Initializing NTP...");
-  Serial.print("NTP Server: ");
-  Serial.println(NTP_SERVER);
-  Serial.print("Timezone: UTC+");
-  Serial.println(NTP_OFFSET / 3600);
+  LOG_PRINTLN("🕐 Initializing NTP...");
+  LOG_PRINT("NTP Server: ");
+  LOG_PRINTLN(NTP_SERVER);
+  LOG_PRINT("Timezone: UTC+");
+  LOG_PRINTLN(String(NTP_OFFSET / 3600));
   
   // Настраиваем NTP (сервер, смещение в секундах, летнее время = 0)
   configTime(NTP_OFFSET, 0, NTP_SERVER);
   
   // Ждем синхронизации времени
-  Serial.print("Waiting for NTP sync");
+  LOG_PRINT("Waiting for NTP sync");
   int ntpRetries = 0;
   time_t now = time(nullptr);
   
   while (now < 1000000000 && ntpRetries < 10) {  // Уменьшили попытки NTP
     delay(500);
-    Serial.print(".");
+    LOG_PRINT(".");
     now = time(nullptr);
     ntpRetries++;
   }
   
   if (now >= 1000000000) {
-    Serial.println("\n✅ NTP time synchronized");
+    LOG_PRINTLN("\n✅ NTP time synchronized");
     struct tm timeinfo;
     localtime_r(&now, &timeinfo);
-    Serial.print("Current time: ");
-    Serial.println(asctime(&timeinfo));
+    LOG_PRINT("Current time: ");
+    LOG_PRINTLN(String(asctime(&timeinfo)));
   } else {
-    Serial.println("\n⚠️ NTP sync failed, trying HTTP API...");
+    LOG_PRINTLN("\n⚠️ NTP sync failed, trying HTTP API...");
     
     // Пробуем синхронизацию через HTTP
     if (syncTimeViaHTTP()) {
       now = time(nullptr);
       struct tm timeinfo;
       localtime_r(&now, &timeinfo);
-      Serial.print("Current time: ");
-      Serial.println(asctime(&timeinfo));
+      LOG_PRINT("Current time: ");
+      LOG_PRINTLN(String(asctime(&timeinfo)));
     } else {
-      Serial.println("⚠️ HTTP sync also failed, time will be set from browser");
+      LOG_PRINTLN("⚠️ HTTP sync also failed, time will be set from browser");
     }
   }
   
@@ -183,39 +184,39 @@ void setup() {
     } else { // U_FS
       type = "filesystem";
     }
-    Serial.println("Start updating " + type);
+    LOG_PRINTLN("Start updating " + type);
     // Выключаем LED во время обновления
     FastLED.clear();
     FastLED.show();
   });
   
   ArduinoOTA.onEnd([]() {
-    Serial.println("\nEnd");
+    LOG_PRINTLN("\nEnd");
   });
   
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    LOG_PRINTF("Progress: %u%%\r", (progress / (total / 100)));
   });
   
   ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    LOG_PRINTF("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) LOG_PRINTLN("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) LOG_PRINTLN("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) LOG_PRINTLN("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) LOG_PRINTLN("Receive Failed");
+    else if (error == OTA_END_ERROR) LOG_PRINTLN("End Failed");
   });
   
   ArduinoOTA.begin();
-  Serial.println("✅ OTA Ready");
+  LOG_PRINTLN("✅ OTA Ready");
   
   // Запуск веб-сервера
   setupWebServer();
   
-  Serial.println("\n🌐 Web server started");
-  Serial.print("Open http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("/ in your browser\n");
+  LOG_PRINTLN("\n🌐 Web server started");
+  LOG_PRINT("Open http://");
+  LOG_PRINT(WiFi.localIP().toString());
+  LOG_PRINTLN("/ in your browser\n");
   
   lastModeSwitch = millis();
 }
@@ -270,12 +271,12 @@ void checkSchedules() {
     ledState.power = schedule.action;
     saveLEDState();
     
-    Serial.print("⏰ Schedule triggered: ");
-    Serial.print(schedule.action ? "ON" : "OFF");
-    Serial.print(" at ");
-    Serial.print(currentHour);
-    Serial.print(":");
-    Serial.println(currentMinute);
+    LOG_PRINT("⏰ Schedule triggered: ");
+    LOG_PRINT(schedule.action ? "ON" : "OFF");
+    LOG_PRINT(" at ");
+    LOG_PRINT(String(currentHour));
+    LOG_PRINT(":");
+    LOG_PRINTLN(String(currentMinute));
   }
 }
 
@@ -291,7 +292,7 @@ void loop() {
     time_t now = time(nullptr);
     if (now < 1000000000) {
       // Время не синхронизировано, пробуем снова
-      Serial.println("⏰ Time not synced, attempting HTTP sync...");
+      LOG_PRINTLN("⏰ Time not synced, attempting HTTP sync...");
       syncTimeViaHTTP();
     }
   }
@@ -350,8 +351,8 @@ void loop() {
           }
         }
         
-        Serial.print("Auto-switched to mode: ");
-        Serial.println(ledState.currentMode);
+        LOG_PRINT("Auto-switched to mode: ");
+        LOG_PRINTLN(String(ledState.currentMode));
         
         saveLEDState();
       }

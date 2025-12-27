@@ -37,4 +37,9 @@
 // Расписание
 #define MAX_SCHEDULES 10          // Максимальное количество расписаний
 
+// Логирование
+#define LOG_BUFFER_SIZE 50        // Размер кольцевого буфера логов
+#define LOG_ENABLE_TIMESTAMPS true // Включить временные метки
+#define LOG_WEBSOCKET_PATH "/ws/logs" // WebSocket endpoint для логов
+
 #endif

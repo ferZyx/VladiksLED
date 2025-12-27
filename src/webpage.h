@@ -129,6 +129,34 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
                 <!-- Modes will be loaded here -->
             </div>
         </div>
+
+        <!-- Logs Console -->
+        <div class="glass rounded-2xl shadow-2xl p-3 mt-3">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xl font-bold text-white">📋 Логи</h2>
+                <div class="flex gap-2">
+                    <button id="pauseLogsBtn" onclick="toggleLogsPause()" 
+                            class="bg-yellow-500 hover:bg-yellow-600 text-white text-xs py-1 px-3 rounded-lg">
+                        ⏸️ Пауза
+                    </button>
+                    <button onclick="clearLogs()" 
+                            class="bg-red-500 hover:bg-red-600 text-white text-xs py-1 px-3 rounded-lg">
+                        🗑️ Очистить
+                    </button>
+                    <button onclick="downloadLogs()" 
+                            class="bg-blue-500 hover:bg-blue-600 text-white text-xs py-1 px-3 rounded-lg">
+                        💾 Скачать
+                    </button>
+                </div>
+            </div>
+            <div id="logsConsole" class="bg-black bg-opacity-80 rounded-lg p-3 h-64 overflow-y-auto font-mono text-xs text-green-400">
+                <div class="text-gray-400">Подключение к WebSocket...</div>
+            </div>
+            <div class="mt-2 text-white text-xs opacity-75">
+                <span id="wsStatus" class="inline-block w-2 h-2 rounded-full bg-yellow-500 mr-1"></span>
+                <span id="wsStatusText">Подключение...</span>
+            </div>
+        </div>
     </div>
 
     <!-- Settings Modal -->
@@ -777,6 +805,129 @@ const modeNames = [
             }
         }
 
+        // WebSocket for logs
+        let ws = null;
+        let logsBuffer = [];
+        let logsPaused = false;
+        let maxLogsInBuffer = 200;
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                updateWSStatus(true);
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                updateWSStatus(false);
+                // Reconnect after 3 seconds
+                setTimeout(connectWebSocket, 3000);
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                updateWSStatus(false);
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'history') {
+                        // Load history logs
+                        data.logs.forEach(log => addLogToConsole(log.timestamp, log.message));
+                    } else if (data.timestamp && data.message) {
+                        // New log message
+                        addLogToConsole(data.timestamp, data.message);
+                    }
+                } catch (e) {
+                    console.error('Error parsing WebSocket message:', e);
+                }
+            };
+        }
+
+        function updateWSStatus(connected) {
+            const statusDot = document.getElementById('wsStatus');
+            const statusText = document.getElementById('wsStatusText');
+            
+            if (connected) {
+                statusDot.className = 'inline-block w-2 h-2 rounded-full bg-green-500 mr-1';
+                statusText.textContent = 'Подключено';
+            } else {
+                statusDot.className = 'inline-block w-2 h-2 rounded-full bg-red-500 mr-1';
+                statusText.textContent = 'Отключено';
+            }
+        }
+
+        function addLogToConsole(timestamp, message) {
+            if (logsPaused) return;
+            
+            // Add to buffer
+            logsBuffer.push({ timestamp, message });
+            if (logsBuffer.length > maxLogsInBuffer) {
+                logsBuffer.shift();
+            }
+            
+            const console = document.getElementById('logsConsole');
+            const logLine = document.createElement('div');
+            logLine.className = 'log-line';
+            
+            // Escape HTML
+            const escapedMsg = message
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\\n/g, '<br>');
+            
+            logLine.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> ${escapedMsg}`;
+            console.appendChild(logLine);
+            
+            // Auto-scroll to bottom
+            console.scrollTop = console.scrollHeight;
+            
+            // Limit console lines
+            while (console.children.length > maxLogsInBuffer) {
+                console.removeChild(console.firstChild);
+            }
+        }
+
+        function clearLogs() {
+            document.getElementById('logsConsole').innerHTML = '';
+            logsBuffer = [];
+        }
+
+        function toggleLogsPause() {
+            logsPaused = !logsPaused;
+            const btn = document.getElementById('pauseLogsBtn');
+            if (logsPaused) {
+                btn.innerHTML = '▶️ Продолжить';
+                btn.classList.remove('bg-yellow-500', 'hover:bg-yellow-600');
+                btn.classList.add('bg-green-500', 'hover:bg-green-600');
+            } else {
+                btn.innerHTML = '⏸️ Пауза';
+                btn.classList.remove('bg-green-500', 'hover:bg-green-600');
+                btn.classList.add('bg-yellow-500', 'hover:bg-yellow-600');
+            }
+        }
+
+        function downloadLogs() {
+            const logsText = logsBuffer.map(log => `[${log.timestamp}] ${log.message}`).join('\n');
+            const blob = new Blob([logsText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `esp8266-logs-${new Date().toISOString().replace(/:/g, '-')}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
         // Initialize on load
         window.addEventListener('DOMContentLoaded', () => {
             // Sync time from browser first
@@ -785,6 +936,9 @@ const modeNames = [
             loadState();
             // Refresh state every 5 seconds
             setInterval(loadState, 5000);
+            
+            // Connect WebSocket for logs
+            connectWebSocket();
         });
     </script>
 </body>

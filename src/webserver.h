@@ -1,32 +1,48 @@
 #ifndef WEBSERVER_H
 #define WEBSERVER_H
 
-#include <ESP8266WebServer.h>
+// Define HTTP method constants before including ESPAsyncWebServer
+#ifndef HTTP_ANY
+#define HTTP_ANY 0xFF
+#endif
+#ifndef HTTP_GET
+#define HTTP_GET 0x01
+#endif
+#ifndef HTTP_POST
+#define HTTP_POST 0x02
+#endif
+#ifndef HTTP_DELETE
+#define HTTP_DELETE 0x04
+#endif
+
+#include <ESPAsyncWebServer.h>
+#include <ESPAsyncTCP.h>
 #include "led_state.h"
 
-extern ESP8266WebServer server;
+extern AsyncWebServer server;
+extern AsyncWebSocket ws;
 
 void setupWebServer();
 void handleWebServer();
 
 // API handlers
 void handleRoot();
-void handleGetState();
-void handleSetPower();
-void handleSetBrightness();
-void handleSetLEDs();
-void handleSetMode();
-void handleGetModeSettings();
-void handleSetModeSettings();
-void handleResetModeSettings();
-void handleToggleModeArchive();
-void handleSetAutoSwitch();
-void handleGetSchedules();
-void handleSetSchedule();
-void handleDeleteSchedule();
-void handleGetTime();
-void handleSetTime();
-void handleGetDebug();
+void handleGetState(AsyncWebServerRequest *request);
+void handleSetPower(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleSetBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleSetLEDs(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleSetMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleGetModeSettings(AsyncWebServerRequest *request);
+void handleSetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleResetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleToggleModeArchive(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleSetAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleGetSchedules(AsyncWebServerRequest *request);
+void handleSetSchedule(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleDeleteSchedule(AsyncWebServerRequest *request);
+void handleGetTime(AsyncWebServerRequest *request);
+void handleSetTime(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleGetDebug(AsyncWebServerRequest *request);
 void handleNotFound();
 
 #endif
