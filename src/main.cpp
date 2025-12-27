@@ -1,42 +1,84 @@
+#include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ArduinoOTA.h>
 #include <FastLED.h>
+#include "config.h"
+#include "led_state.h"
+#include "led_modes.h"
+#include "webserver.h"
 
-// LED Settings
-#define LED_PIN D4
-#define NUM_LEDS 99
-
-CRGB leds[NUM_LEDS];
-
-// WiFi Settings
-const char* ssid = "TP-LINK_8E7C38";
-const char* password = "877746046333";
-
-IPAddress local_IP(192, 168, 1, 222);
-IPAddress gateway(192, 168, 1, 1);
-IPAddress subnet(255, 255, 255, 0);
+// Авто-переключение режимов
+unsigned long lastModeSwitch = 0;
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n\nBooting VladiksLED...");
-
-  // FastLED setup
-  FastLED.addLeds<WS2812, LED_PIN, BGR>(leds, NUM_LEDS);
-  FastLED.setBrightness(50); // Set a reasonable brightness
+  Serial.println("\n\n🎄 WiFi LED Garland Starting...");
+  
+  // Инициализация LED state
+  initLEDState();
+  loadLEDState();
+  
+  // Инициализация LED ленты
+  initLEDs();
+  
+  // Подключение к WiFi
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+  
+  WiFi.mode(WIFI_STA);
+  
+#ifdef USE_STATIC_IP
+  // Настройка статического IP
+  IPAddress local_IP(STATIC_IP);
+  IPAddress gateway(GATEWAY_IP);
+  IPAddress subnet(SUBNET_MASK);
+  
+  if (!WiFi.config(local_IP, gateway, subnet)) {
+    Serial.println("Failed to configure static IP");
+  }
+#endif
+  
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  // Анимация подключения на LED
+  int dotCount = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    
+    // Бегущий огонёк во время подключения
+    FastLED.clear();
+    leds[dotCount % ledState.numLeds] = CRGB::Blue;
+    FastLED.show();
+    dotCount++;
+    
+    // Таймаут 30 секунд
+    if (dotCount > 60) {
+      Serial.println("\n❌ WiFi connection failed!");
+      Serial.println("Please check WIFI_SSID and WIFI_PASSWORD in config.h");
+      
+      // Красная вспышка - ошибка
+      fill_solid(leds, ledState.numLeds, CRGB::Red);
+      FastLED.show();
+      delay(2000);
+      
+      ESP.restart();
+    }
+  }
+  
+  Serial.println("\n✅ WiFi connected!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  
+  // Зелёная вспышка - успех
+  fill_solid(leds, ledState.numLeds, CRGB::Green);
+  FastLED.show();
+  delay(1000);
   FastLED.clear();
   FastLED.show();
   
-  WiFi.mode(WIFI_STA);
-  WiFi.config(local_IP, gateway, subnet); 
-  WiFi.begin(ssid, password);
-  
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("Connection Failed! Rebooting...");
-    delay(5000);
-    ESP.restart();
-  }
-
-  ArduinoOTA.setHostname("VladiksLED");
+  // Настройка OTA обновлений
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
   
   ArduinoOTA.onStart([]() {
     String type;
@@ -46,7 +88,7 @@ void setup() {
       type = "filesystem";
     }
     Serial.println("Start updating " + type);
-    // Turn off LEDs during update
+    // Выключаем LED во время обновления
     FastLED.clear();
     FastLED.show();
   });
@@ -67,21 +109,54 @@ void setup() {
     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
   });
-
-  ArduinoOTA.begin();
   
-  Serial.println("Ready");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  ArduinoOTA.begin();
+  Serial.println("✅ OTA Ready");
+  
+  // Запуск веб-сервера
+  setupWebServer();
+  
+  Serial.println("\n🌐 Web server started");
+  Serial.print("Open http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/ in your browser\n");
+  
+  lastModeSwitch = millis();
 }
 
 void loop() {
+  // Обработка OTA запросов
   ArduinoOTA.handle();
   
-  // Simple rainbow effect
-  static uint8_t hue = 0;
-  fill_rainbow(leds, NUM_LEDS, hue, 7);
-  FastLED.show();
-  hue++;
-  delay(20);
+  // Обработка HTTP запросов
+  handleWebServer();
+  
+  // Запуск текущего режима LED
+  EVERY_N_MILLISECONDS(20) {
+    runMode(ledState.currentMode);
+  }
+  
+  // Авто-переключение режимов
+  if (ledState.autoSwitchDelay > 0) {
+    unsigned long now = millis();
+    if (now - lastModeSwitch >= (ledState.autoSwitchDelay * 1000UL)) {
+      lastModeSwitch = now;
+      
+      if (ledState.randomOrder) {
+        // Случайный режим
+        ledState.currentMode = random8(TOTAL_MODES);
+      } else {
+        // Следующий по порядку
+        ledState.currentMode++;
+        if (ledState.currentMode >= TOTAL_MODES) {
+          ledState.currentMode = 0;
+        }
+      }
+      
+      Serial.print("Auto-switched to mode: ");
+      Serial.println(ledState.currentMode);
+      
+      saveLEDState();
+    }
+  }
 }
