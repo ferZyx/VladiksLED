@@ -21,6 +21,12 @@ void handleSetModeSettings();
 void handleResetModeSettings();
 void handleToggleModeArchive();
 void handleSetAutoSwitch();
+void handleGetSchedules();
+void handleSetSchedule();
+void handleDeleteSchedule();
+void handleGetTime();
+void handleSetTime();
+void handleGetDebug();
 void handleNotFound();
 
 #endif

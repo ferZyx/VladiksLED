@@ -29,4 +29,12 @@
 // Debounce/Throttle настройки
 #define MIN_REQUEST_INTERVAL 100  // Минимальный интервал между запросами (мс)
 
+// NTP настройки
+#define NTP_SERVER "time.google.com"  // Более надежный NTP сервер
+#define NTP_OFFSET 18000          // UTC+5 (Казахстан/Екатеринбург) в секундах
+#define NTP_UPDATE_INTERVAL 3600000  // Обновление каждый час (мс)
+
+// Расписание
+#define MAX_SCHEDULES 10          // Максимальное количество расписаний
+
 #endif

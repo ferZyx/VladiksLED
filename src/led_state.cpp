@@ -21,11 +21,20 @@ void initLEDState() {
     ledState.modeSettings[i].brightness = 255;
     ledState.modeSettings[i].archived = false;
   }
+  
+  // Инициализация расписаний (все выключены)
+  for (int i = 0; i < MAX_SCHEDULES; i++) {
+    ledState.schedules[i].enabled = false;
+    ledState.schedules[i].hour = 0;
+    ledState.schedules[i].minute = 0;
+    ledState.schedules[i].action = true;
+    ledState.schedules[i].daysOfWeek = 0x7F;  // Все дни недели
+  }
 }
 
 void saveLEDState() {
   // Сохранение в EEPROM
-  EEPROM.begin(512);
+  EEPROM.begin(1024);  // Увеличили размер для расписаний
   
   // Сохраняем заголовок с магическим числом
   EEPROMHeader header;
@@ -40,19 +49,49 @@ void saveLEDState() {
   EEPROM.end();
 }
 
+
 void loadLEDState() {
   // Загрузка из EEPROM
-  EEPROM.begin(512);
+  EEPROM.begin(1024);  // Увеличили размер для расписаний
   
   // Читаем заголовок
   EEPROMHeader header;
   EEPROM.get(0, header);
   
   // Проверяем магическое число
-  if (header.magic == EEPROM_MAGIC && header.version == EEPROM_VERSION) {
-    // Данные валидны - загружаем состояние
-    EEPROM.get(sizeof(EEPROMHeader), ledState);
-    Serial.println("✅ LED state loaded from EEPROM");
+  if (header.magic == EEPROM_MAGIC) {
+    if (header.version == EEPROM_VERSION) {
+      // Данные валидны - загружаем состояние
+      EEPROM.get(sizeof(EEPROMHeader), ledState);
+      Serial.println("✅ LED state loaded from EEPROM");
+    } else if (header.version == 1) {
+      // Миграция с версии 1 на версию 2
+      Serial.println("🔄 Migrating EEPROM from v1 to v2...");
+      
+      // Загружаем старые данные (без расписаний)
+      EEPROM.get(sizeof(EEPROMHeader), ledState);
+      
+      // Инициализируем новые поля (расписания)
+      for (int i = 0; i < MAX_SCHEDULES; i++) {
+        ledState.schedules[i].enabled = false;
+        ledState.schedules[i].hour = 0;
+        ledState.schedules[i].minute = 0;
+        ledState.schedules[i].action = true;
+        ledState.schedules[i].daysOfWeek = 0x7F;
+      }
+      
+      EEPROM.end();
+      saveLEDState();  // Сохраняем с новой версией
+      Serial.println("✅ Migration complete");
+      return;
+    } else {
+      // Неизвестная версия
+      Serial.println("⚠️ Unknown EEPROM version, initializing defaults");
+      initLEDState();
+      EEPROM.end();
+      saveLEDState();
+      return;
+    }
   } else {
     // Первый запуск или неверные данные - инициализируем и сохраняем
     Serial.println("⚠️ No valid EEPROM data found, initializing defaults");

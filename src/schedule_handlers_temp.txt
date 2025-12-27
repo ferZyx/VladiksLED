@@ -1,0 +1,104 @@
+// Schedule API handlers implementation - to be appended to webserver.cpp
+
+void handleGetSchedules() {
+  DynamicJsonDocument doc(2048);
+  
+  JsonArray schedules = doc.createNestedArray("schedules");
+  for (int i = 0; i < MAX_SCHEDULES; i++) {
+    JsonObject schedule = schedules.createNestedObject();
+    schedule["id"] = i;
+    schedule["enabled"] = ledState.schedules[i].enabled;
+    schedule["hour"] = ledState.schedules[i].hour;
+    schedule["minute"] = ledState.schedules[i].minute;
+    schedule["action"] = ledState.schedules[i].action;
+    schedule["daysOfWeek"] = ledState.schedules[i].daysOfWeek;
+  }
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleSetSchedule() {
+  if (!checkThrottle()) {
+    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  if (server.hasArg("plain")) {
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    
+    if (!error && doc.containsKey("id")) {
+      int id = doc["id"];
+      
+      if (id < 0 || id >= MAX_SCHEDULES) {
+        server.send(400, "application/json", "{\"error\":\"Invalid schedule ID\"}");
+        return;
+      }
+      
+      if (doc.containsKey("enabled")) {
+        ledState.schedules[id].enabled = doc["enabled"];
+      }
+      if (doc.containsKey("hour")) {
+        ledState.schedules[id].hour = doc["hour"];
+      }
+      if (doc.containsKey("minute")) {
+        ledState.schedules[id].minute = doc["minute"];
+      }
+      if (doc.containsKey("action")) {
+        ledState.schedules[id].action = doc["action"];
+      }
+      if (doc.containsKey("daysOfWeek")) {
+        ledState.schedules[id].daysOfWeek = doc["daysOfWeek"];
+      }
+      
+      saveLEDState();
+      server.send(200, "application/json", "{\"success\":true}");
+      return;
+    }
+  }
+  
+  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleDeleteSchedule() {
+  if (!checkThrottle()) {
+    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  if (server.hasArg("id")) {
+    int id = server.arg("id").toInt();
+    
+    if (id < 0 || id >= MAX_SCHEDULES) {
+      server.send(400, "application/json", "{\"error\":\"Invalid schedule ID\"}");
+      return;
+    }
+    
+    // Отключаем расписание
+    ledState.schedules[id].enabled = false;
+    saveLEDState();
+    
+    server.send(200, "application/json", "{\"success\":true}");
+    return;
+  }
+  
+  server.send(400, "application/json", "{\"error\":\"Missing id parameter\"}");
+}
+
+void handleGetTime() {
+  timeClient.update();
+  
+  StaticJsonDocument<256> doc;
+  doc["hour"] = timeClient.getHours();
+  doc["minute"] = timeClient.getMinutes();
+  doc["second"] = timeClient.getSeconds();
+  doc["dayOfWeek"] = timeClient.getDay();  // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+  doc["timestamp"] = timeClient.getEpochTime();
+  doc["formatted"] = timeClient.getFormattedTime();
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}

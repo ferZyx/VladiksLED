@@ -11,7 +11,16 @@ struct EEPROMHeader {
 };
 
 #define EEPROM_MAGIC 0x4C454456  // "LEDV" in hex
-#define EEPROM_VERSION 1
+#define EEPROM_VERSION 2
+
+// Структура расписания
+struct Schedule {
+  bool enabled;        // Активно ли расписание
+  uint8_t hour;        // Час (0-23)
+  uint8_t minute;      // Минута (0-59)
+  bool action;         // true = включить, false = выключить
+  uint8_t daysOfWeek;  // Битовая маска дней недели (bit 0 = Пн, bit 6 = Вс, 0x7F = все дни)
+};
 
 // Настройки режима
 struct ModeSettings {
@@ -32,6 +41,7 @@ struct LEDState {
   uint16_t autoSwitchDelay;       // Delay переключения в секундах (0 = выкл)
   bool randomOrder;               // Случайный порядок режимов
   ModeSettings modeSettings[41];  // Настройки каждого из 41 режимов
+  Schedule schedules[10];         // Расписания включения/выключения
 };
 
 // Глобальная переменная состояния

@@ -89,11 +89,17 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
                 </div>
             </div>
 
-            <!-- Settings Button -->
-            <button onclick="openSettings()" 
-                    class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-xl transition duration-300">
-                ⚙️ Настройки
-            </button>
+            <!-- Settings and Schedule Buttons -->
+            <div class="flex gap-2">
+                <button onclick="openSettings()" 
+                        class="flex-1 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-xl transition duration-300">
+                    ⚙️ Настройки
+                </button>
+                <button onclick="openSchedule()" 
+                        class="flex-1 bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded-xl transition duration-300">
+                    📅 Расписание
+                </button>
+            </div>
         </div>
 
         <!-- Modes Grid -->
@@ -202,6 +208,77 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
+    <!-- Schedule Modal -->
+    <div id="scheduleModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="glass rounded-2xl p-4 m-4 max-w-md w-full max-h-[90vh] overflow-y-auto">
+            <h2 class="text-xl font-bold text-white mb-3">📅 Расписание</h2>
+            
+            <!-- Current Time Display -->
+            <div class="mb-4 p-3 bg-white bg-opacity-20 rounded-xl">
+                <div class="text-white text-center">
+                    <div class="text-sm opacity-75">Текущее время ESP8266:</div>
+                    <div class="text-2xl font-bold" id="currentTime">--:--</div>
+                    <div class="text-xs opacity-75" id="currentDay">-</div>
+                </div>
+            </div>
+            
+            <!-- Add Schedule Form -->
+            <div class="mb-4 p-3 bg-white bg-opacity-10 rounded-xl">
+                <h3 class="text-white font-semibold mb-2 text-sm">Добавить расписание</h3>
+                
+                <div class="mb-2">
+                    <label class="text-white block mb-1 text-xs">Время</label>
+                    <div class="flex gap-2">
+                        <input type="number" id="scheduleHour" min="0" max="23" value="8" placeholder="ЧЧ"
+                               class="flex-1 bg-white bg-opacity-20 text-white px-2 py-1 rounded text-center text-sm">
+                        <span class="text-white self-center">:</span>
+                        <input type="number" id="scheduleMinute" min="0" max="59" value="0" placeholder="ММ"
+                               class="flex-1 bg-white bg-opacity-20 text-white px-2 py-1 rounded text-center text-sm">
+                    </div>
+                </div>
+                
+                <div class="mb-2">
+                    <label class="text-white block mb-1 text-xs">Действие</label>
+                    <select id="scheduleAction" class="w-full bg-white bg-opacity-20 text-white px-2 py-1 rounded text-sm">
+                        <option value="true">Включить</option>
+                        <option value="false">Выключить</option>
+                    </select>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="text-white block mb-1 text-xs">Дни недели</label>
+                    <div class="grid grid-cols-7 gap-1">
+                        <button onclick="toggleDay(0)" id="day0" class="day-btn bg-white bg-opacity-20 text-white text-xs py-1 rounded">Пн</button>
+                        <button onclick="toggleDay(1)" id="day1" class="day-btn bg-white bg-opacity-20 text-white text-xs py-1 rounded">Вт</button>
+                        <button onclick="toggleDay(2)" id="day2" class="day-btn bg-white bg-opacity-20 text-white text-xs py-1 rounded">Ср</button>
+                        <button onclick="toggleDay(3)" id="day3" class="day-btn bg-white bg-opacity-20 text-white text-xs py-1 rounded">Чт</button>
+                        <button onclick="toggleDay(4)" id="day4" class="day-btn bg-white bg-opacity-20 text-white text-xs py-1 rounded">Пт</button>
+                        <button onclick="toggleDay(5)" id="day5" class="day-btn bg-white bg-opacity-20 text-white text-xs py-1 rounded">Сб</button>
+                        <button onclick="toggleDay(6)" id="day6" class="day-btn bg-white bg-opacity-20 text-white text-xs py-1 rounded">Вс</button>
+                    </div>
+                </div>
+                
+                <button onclick="addSchedule()" 
+                        class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
+                    ➕ Добавить
+                </button>
+            </div>
+            
+            <!-- Schedule List -->
+            <div class="mb-3">
+                <h3 class="text-white font-semibold mb-2 text-sm">Активные расписания</h3>
+                <div id="scheduleList" class="space-y-2">
+                    <!-- Schedules will be loaded here -->
+                </div>
+            </div>
+            
+            <button onclick="closeSchedule()" 
+                    class="w-full bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
+                Закрыть
+            </button>
+        </div>
+    </div>
+
     <script>
         // Названия режимов
 const modeNames = [
@@ -223,6 +300,9 @@ const modeNames = [
         let modeSettingsDebounceTimer = null;
         let modeSettingsCache = [];  // Cache for mode settings
         let currentTab = 'active';  // Current tab (active or archived)
+        let selectedDays = 0x7F;  // Битовая маска выбранных дней (по умолчанию все дни)
+        let schedulesCache = [];  // Cache for schedules
+        let currentTimeInterval = null;  // Interval for updating current time
 
         // API calls
         async function apiCall(endpoint, data = null) {
@@ -517,8 +597,191 @@ const modeNames = [
             });
         }
 
+        // Schedule functions
+        function openSchedule() {
+            document.getElementById('scheduleModal').classList.remove('hidden');
+            document.getElementById('scheduleModal').classList.add('flex');
+            loadSchedules();
+            updateCurrentTime();
+            // Update time every second while modal is open
+            currentTimeInterval = setInterval(updateCurrentTime, 1000);
+            // Reset day selection to all days
+            selectedDays = 0x7F;
+            updateDayButtons();
+        }
+
+        function closeSchedule() {
+            document.getElementById('scheduleModal').classList.add('hidden');
+            document.getElementById('scheduleModal').classList.remove('flex');
+            if (currentTimeInterval) {
+                clearInterval(currentTimeInterval);
+                currentTimeInterval = null;
+            }
+        }
+
+        function toggleDay(dayIndex) {
+            // Toggle bit for this day
+            selectedDays ^= (1 << dayIndex);
+            updateDayButtons();
+        }
+
+        function updateDayButtons() {
+            for (let i = 0; i < 7; i++) {
+                const btn = document.getElementById(`day${i}`);
+                if (selectedDays & (1 << i)) {
+                    btn.classList.remove('bg-white', 'bg-opacity-20');
+                    btn.classList.add('bg-green-500');
+                } else {
+                    btn.classList.remove('bg-green-500');
+                    btn.classList.add('bg-white', 'bg-opacity-20');
+                }
+            }
+        }
+
+        async function updateCurrentTime() {
+            const time = await apiCall('/api/time');
+            if (time) {
+                const hour = String(time.hour).padStart(2, '0');
+                const minute = String(time.minute).padStart(2, '0');
+                document.getElementById('currentTime').textContent = `${hour}:${minute}`;
+                
+                const days = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+                document.getElementById('currentDay').textContent = days[time.dayOfWeek];
+            }
+        }
+
+        async function loadSchedules() {
+            const data = await apiCall('/api/schedules');
+            if (data && data.schedules) {
+                schedulesCache = data.schedules;
+                renderSchedules();
+            }
+        }
+
+        function renderSchedules() {
+            const list = document.getElementById('scheduleList');
+            list.innerHTML = '';
+            
+            const activeSchedules = schedulesCache.filter(s => s.enabled);
+            
+            if (activeSchedules.length === 0) {
+                list.innerHTML = '<div class="text-white text-sm opacity-75 text-center py-2">Нет активных расписаний</div>';
+                return;
+            }
+            
+            activeSchedules.forEach(schedule => {
+                const hour = String(schedule.hour).padStart(2, '0');
+                const minute = String(schedule.minute).padStart(2, '0');
+                const action = schedule.action ? '🟢 Включить' : '🔴 Выключить';
+                
+                // Decode days
+                const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+                const activeDays = [];
+                for (let i = 0; i < 7; i++) {
+                    if (schedule.daysOfWeek & (1 << i)) {
+                        activeDays.push(dayNames[i]);
+                    }
+                }
+                const daysStr = activeDays.length === 7 ? 'Каждый день' : activeDays.join(', ');
+                
+                const card = document.createElement('div');
+                card.className = 'bg-white bg-opacity-10 rounded-lg p-2';
+                card.innerHTML = `
+                    <div class="flex justify-between items-start">
+                        <div class="flex-1">
+                            <div class="text-white font-bold text-sm">${hour}:${minute}</div>
+                            <div class="text-white text-xs opacity-90">${action}</div>
+                            <div class="text-white text-xs opacity-75">${daysStr}</div>
+                        </div>
+                        <button onclick="deleteSchedule(${schedule.id})" 
+                                class="bg-red-500 hover:bg-red-600 text-white text-xs py-1 px-2 rounded">
+                            🗑️
+                        </button>
+                    </div>
+                `;
+                list.appendChild(card);
+            });
+        }
+
+        async function addSchedule() {
+            const hour = parseInt(document.getElementById('scheduleHour').value);
+            const minute = parseInt(document.getElementById('scheduleMinute').value);
+            const action = document.getElementById('scheduleAction').value === 'true';
+            
+            // Validation
+            if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                alert('Неверное время! Часы: 0-23, Минуты: 0-59');
+                return;
+            }
+            
+            if (selectedDays === 0) {
+                alert('Выберите хотя бы один день недели!');
+                return;
+            }
+            
+            // Find first available schedule slot
+            let scheduleId = -1;
+            for (let i = 0; i < schedulesCache.length; i++) {
+                if (!schedulesCache[i].enabled) {
+                    scheduleId = i;
+                    break;
+                }
+            }
+            
+            if (scheduleId === -1) {
+                alert('Достигнут лимит расписаний (максимум 10)');
+                return;
+            }
+            
+            const result = await apiCall('/api/schedules', {
+                id: scheduleId,
+                enabled: true,
+                hour: hour,
+                minute: minute,
+                action: action,
+                daysOfWeek: selectedDays
+            });
+            
+            if (result && result.success) {
+                await loadSchedules();
+                // Reset form
+                document.getElementById('scheduleHour').value = 8;
+                document.getElementById('scheduleMinute').value = 0;
+                document.getElementById('scheduleAction').value = 'true';
+                selectedDays = 0x7F;
+                updateDayButtons();
+            }
+        }
+
+        async function deleteSchedule(id) {
+            if (!confirm('Удалить это расписание?')) {
+                return;
+            }
+            
+            const result = await fetch(`/api/schedules?id=${id}`, { method: 'DELETE' });
+            if (result.ok) {
+                await loadSchedules();
+            }
+        }
+
+        // Sync time from browser to ESP8266 (fallback for NTP issues)
+        async function syncTimeFromBrowser() {
+            const timestamp = Math.floor(Date.now() / 1000);  // Current Unix timestamp
+            console.log('Syncing time from browser:', timestamp, new Date());
+            
+            const result = await apiCall('/api/time/set', { timestamp: timestamp });
+            if (result && result.success) {
+                console.log('✅ Time synced successfully');
+            } else {
+                console.log('⚠️ Failed to sync time');
+            }
+        }
+
         // Initialize on load
         window.addEventListener('DOMContentLoaded', () => {
+            // Sync time from browser first
+            syncTimeFromBrowser();
+            
             loadState();
             // Refresh state every 5 seconds
             setInterval(loadState, 5000);
