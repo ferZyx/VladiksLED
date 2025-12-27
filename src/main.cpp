@@ -142,21 +142,43 @@ void loop() {
     if (now - lastModeSwitch >= (ledState.autoSwitchDelay * 1000UL)) {
       lastModeSwitch = now;
       
-      if (ledState.randomOrder) {
-        // Случайный режим
-        ledState.currentMode = random8(TOTAL_MODES);
-      } else {
-        // Следующий по порядку
-        ledState.currentMode++;
-        if (ledState.currentMode >= TOTAL_MODES) {
-          ledState.currentMode = 0;
+      // Собираем список активных (не архивных) режимов
+      uint8_t activeModes[TOTAL_MODES];
+      uint8_t activeCount = 0;
+      
+      for (uint8_t i = 0; i < TOTAL_MODES; i++) {
+        if (!ledState.modeSettings[i].archived) {
+          activeModes[activeCount++] = i;
         }
       }
       
-      Serial.print("Auto-switched to mode: ");
-      Serial.println(ledState.currentMode);
-      
-      saveLEDState();
+      // Если есть активные режимы, переключаемся
+      if (activeCount > 0) {
+        if (ledState.randomOrder) {
+          // Случайный режим из активных
+          uint8_t randomIndex = random8(activeCount);
+          ledState.currentMode = activeModes[randomIndex];
+        } else {
+          // Следующий по порядку среди активных
+          bool found = false;
+          for (uint8_t i = 0; i < activeCount; i++) {
+            if (activeModes[i] > ledState.currentMode) {
+              ledState.currentMode = activeModes[i];
+              found = true;
+              break;
+            }
+          }
+          // Если не нашли следующий, берем первый активный
+          if (!found) {
+            ledState.currentMode = activeModes[0];
+          }
+        }
+        
+        Serial.print("Auto-switched to mode: ");
+        Serial.println(ledState.currentMode);
+        
+        saveLEDState();
+      }
     }
   }
 }

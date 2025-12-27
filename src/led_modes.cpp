@@ -169,6 +169,6 @@ void mode_juggle() {
 
 // Solid Color - один цвет
 void mode_solid_color() {
-  CRGB color = ledState.modeSettings[ledState.currentMode].color1;
+  CRGB color = CRGB::White;
   fill_solid(leds, ledState.numLeds, color);
 }

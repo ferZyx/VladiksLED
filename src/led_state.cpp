@@ -19,6 +19,7 @@ void initLEDState() {
     ledState.modeSettings[i].color1 = CRGB::Red;
     ledState.modeSettings[i].color2 = CRGB::Blue;
     ledState.modeSettings[i].brightness = 255;
+    ledState.modeSettings[i].archived = false;
   }
 }
 

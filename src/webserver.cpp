@@ -27,7 +27,9 @@ void setupWebServer() {
   server.on("/api/brightness", HTTP_POST, handleSetBrightness);
   server.on("/api/leds", HTTP_POST, handleSetLEDs);
   server.on("/api/mode", HTTP_POST, handleSetMode);
+  server.on("/api/mode/settings/get", HTTP_GET, handleGetModeSettings);
   server.on("/api/mode/settings", HTTP_POST, handleSetModeSettings);
+  server.on("/api/mode/archive", HTTP_POST, handleToggleModeArchive);
   server.on("/api/auto-switch", HTTP_POST, handleSetAutoSwitch);
   
   server.onNotFound(handleNotFound);
@@ -45,7 +47,7 @@ void handleRoot() {
 }
 
 void handleGetState() {
-  StaticJsonDocument<2048> doc;
+  DynamicJsonDocument doc(8192);
   
   doc["power"] = ledState.power;
   doc["brightness"] = ledState.brightness;
@@ -53,6 +55,16 @@ void handleGetState() {
   doc["currentMode"] = ledState.currentMode;
   doc["autoSwitchDelay"] = ledState.autoSwitchDelay;
   doc["randomOrder"] = ledState.randomOrder;
+  
+  // Добавляем настройки всех режимов
+  JsonArray modes = doc.createNestedArray("modeSettings");
+  for (int i = 0; i < TOTAL_MODES; i++) {
+    JsonObject mode = modes.createNestedObject();
+    mode["speed"] = ledState.modeSettings[i].speed;
+    mode["scale"] = ledState.modeSettings[i].scale;
+    mode["brightness"] = ledState.modeSettings[i].brightness;
+    mode["archived"] = ledState.modeSettings[i].archived;
+  }
   
   String response;
   serializeJson(doc, response);
@@ -177,14 +189,59 @@ void handleSetModeSettings() {
       if (doc.containsKey("brightness")) {
         ledState.modeSettings[modeId].brightness = doc["brightness"];
       }
-      if (doc.containsKey("color1")) {
-        JsonObject color1 = doc["color1"];
-        ledState.modeSettings[modeId].color1 = CRGB(color1["r"], color1["g"], color1["b"]);
+      saveLEDState();
+      server.send(200, "application/json", "{\"success\":true}");
+      return;
+    }
+  }
+  
+  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleGetModeSettings() {
+  if (server.hasArg("modeId")) {
+    int modeId = server.arg("modeId").toInt();
+    
+    if (modeId < 0 || modeId >= TOTAL_MODES) {
+      server.send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
+      return;
+    }
+    
+    StaticJsonDocument<256> doc;
+    doc["speed"] = ledState.modeSettings[modeId].speed;
+    doc["scale"] = ledState.modeSettings[modeId].scale;
+    doc["brightness"] = ledState.modeSettings[modeId].brightness;
+    doc["archived"] = ledState.modeSettings[modeId].archived;
+    
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+    return;
+  }
+  
+  server.send(400, "application/json", "{\"error\":\"Missing modeId parameter\"}");
+}
+
+void handleToggleModeArchive() {
+  if (!checkThrottle()) {
+    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  if (server.hasArg("plain")) {
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    
+    if (!error && doc.containsKey("modeId")) {
+      int modeId = doc["modeId"];
+      
+      if (modeId < 0 || modeId >= TOTAL_MODES) {
+        server.send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
+        return;
       }
-      if (doc.containsKey("color2")) {
-        JsonObject color2 = doc["color2"];
-        ledState.modeSettings[modeId].color2 = CRGB(color2["r"], color2["g"], color2["b"]);
-      }
+      
+      bool archived = doc["archived"];
+      ledState.modeSettings[modeId].archived = archived;
       saveLEDState();
       server.send(200, "application/json", "{\"success\":true}");
       return;

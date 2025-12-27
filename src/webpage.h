@@ -106,6 +106,19 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
                 <span class="text-white text-sm" id="currentModeName">-</span>
                 <span class="text-white text-xs opacity-75 ml-1" id="currentModeIndex">(0/41)</span>
             </div>
+            
+            <!-- Tabs for Active/Archived -->
+            <div class="flex gap-2 mb-3">
+                <button id="activeTab" onclick="switchTab('active')" 
+                        class="flex-1 py-2 px-4 rounded-lg font-semibold transition duration-300 bg-green-500 text-white">
+                    ✅ Активные
+                </button>
+                <button id="archivedTab" onclick="switchTab('archived')" 
+                        class="flex-1 py-2 px-4 rounded-lg font-semibold transition duration-300 bg-white bg-opacity-20 text-white">
+                    📦 Архивные
+                </button>
+            </div>
+            
             <div id="modesGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
                 <!-- Modes will be loaded here -->
             </div>
@@ -151,40 +164,27 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             <div class="mb-3">
                 <label class="text-white block mb-1 text-sm">Скорость</label>
                 <input type="range" id="modeSpeed" min="0" max="255" value="128"
-                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer">
+                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
+                       oninput="updateModeSettings()">
             </div>
 
             <div class="mb-3">
                 <label class="text-white block mb-1 text-sm">Масштаб</label>
                 <input type="range" id="modeScale" min="0" max="255" value="128"
-                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer">
+                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
+                       oninput="updateModeSettings()">
             </div>
 
             <div class="mb-3">
                 <label class="text-white block mb-1 text-sm">Яркость режима</label>
                 <input type="range" id="modeBrightness" min="0" max="255" value="255"
-                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer">
-            </div>
-
-            <div class="mb-3">
-                <label class="text-white block mb-1 text-sm">Цвет 1</label>
-                <input type="color" id="modeColor1" value="#ff0000"
-                       class="w-full h-10 rounded-lg cursor-pointer">
-            </div>
-
-            <div class="mb-3">
-                <label class="text-white block mb-1 text-sm">Цвет 2</label>
-                <input type="color" id="modeColor2" value="#0000ff"
-                       class="w-full h-10 rounded-lg cursor-pointer">
+                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
+                       oninput="updateModeSettings()">
             </div>
 
             <div class="flex gap-2">
-                <button onclick="saveModeSettings()" 
-                        class="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
-                    Применить
-                </button>
                 <button onclick="closeModeSettings()" 
-                        class="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
+                        class="w-full bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
                     Закрыть
                 </button>
             </div>
@@ -207,6 +207,9 @@ const modeNames = [
         let currentModeId = 0;
         let brightnessDebounceTimer = null;
         let ledCountDebounceTimer = null;
+        let modeSettingsDebounceTimer = null;
+        let modeSettingsCache = [];  // Cache for mode settings
+        let currentTab = 'active';  // Current tab (active or archived)
 
         // API calls
         async function apiCall(endpoint, data = null) {
@@ -304,9 +307,18 @@ const modeNames = [
         }
 
         // Open mode settings
-        function openModeSettings(modeId) {
+        async function openModeSettings(modeId) {
             currentModeId = modeId;
             document.getElementById('modeSettingsTitle').textContent = `${modeNames[modeId]} - Настройки`;
+            
+            // Load current settings from cache or server
+            if (modeSettingsCache[modeId]) {
+                const settings = modeSettingsCache[modeId];
+                document.getElementById('modeSpeed').value = settings.speed;
+                document.getElementById('modeScale').value = settings.scale;
+                document.getElementById('modeBrightness').value = settings.brightness;
+            }
+            
             document.getElementById('modeSettingsModal').classList.remove('hidden');
             document.getElementById('modeSettingsModal').classList.add('flex');
         }
@@ -316,25 +328,21 @@ const modeNames = [
             document.getElementById('modeSettingsModal').classList.remove('flex');
         }
 
-        async function saveModeSettings() {
-            const speed = document.getElementById('modeSpeed').value;
-            const scale = document.getElementById('modeScale').value;
-            const brightness = document.getElementById('modeBrightness').value;
-            const color1Hex = document.getElementById('modeColor1').value;
-            const color2Hex = document.getElementById('modeColor2').value;
-            
-            const color1 = hexToRgb(color1Hex);
-            const color2 = hexToRgb(color2Hex);
-            
-            await apiCall('/api/mode/settings', {
-                modeId: currentModeId,
-                speed: parseInt(speed),
-                scale: parseInt(scale),
-                brightness: parseInt(brightness),
-                color1: color1,
-                color2: color2
-            });
-            closeModeSettings();
+        // Update mode settings with debounce (auto-apply)
+        function updateModeSettings() {
+            clearTimeout(modeSettingsDebounceTimer);
+            modeSettingsDebounceTimer = setTimeout(async () => {
+                const speed = document.getElementById('modeSpeed').value;
+                const scale = document.getElementById('modeScale').value;
+                const brightness = document.getElementById('modeBrightness').value;
+                
+                await apiCall('/api/mode/settings', {
+                    modeId: currentModeId,
+                    speed: parseInt(speed),
+                    scale: parseInt(scale),
+                    brightness: parseInt(brightness)
+                });
+            }, 300);
         }
 
         // Settings modal
@@ -368,20 +376,73 @@ const modeNames = [
                 document.getElementById('autoSwitchDelay').value = state.autoSwitchDelay;
                 document.getElementById('randomOrder').checked = state.randomOrder;
                 currentModeId = state.currentMode;
+                
+                // Cache mode settings
+                if (state.modeSettings) {
+                    modeSettingsCache = state.modeSettings;
+                }
+                
                 updateBrightness(state.brightness);
+                renderModes();
                 updateModeCards();
             }
         }
 
-        // Initialize modes grid
-        function initModes() {
+        // Switch between active and archived tabs
+        function switchTab(tab) {
+            currentTab = tab;
+            const activeBtn = document.getElementById('activeTab');
+            const archivedBtn = document.getElementById('archivedTab');
+            
+            if (tab === 'active') {
+                activeBtn.classList.remove('bg-white', 'bg-opacity-20');
+                activeBtn.classList.add('bg-green-500');
+                archivedBtn.classList.remove('bg-green-500');
+                archivedBtn.classList.add('bg-white', 'bg-opacity-20');
+            } else {
+                archivedBtn.classList.remove('bg-white', 'bg-opacity-20');
+                archivedBtn.classList.add('bg-green-500');
+                activeBtn.classList.remove('bg-green-500');
+                activeBtn.classList.add('bg-white', 'bg-opacity-20');
+            }
+            
+            renderModes();
+        }
+        
+        // Toggle archive status
+        async function toggleArchive(modeId, event) {
+            event.stopPropagation();
+            const isArchived = modeSettingsCache[modeId]?.archived || false;
+            await apiCall('/api/mode/archive', {
+                modeId: modeId,
+                archived: !isArchived
+            });
+            // Reload state to update cache
+            await loadState();
+        }
+        
+        // Render modes based on current tab
+        function renderModes() {
             const grid = document.getElementById('modesGrid');
+            grid.innerHTML = '';
+            
             modeNames.forEach((name, index) => {
+                const isArchived = modeSettingsCache[index]?.archived || false;
+                
+                // Filter based on current tab
+                if ((currentTab === 'active' && isArchived) || (currentTab === 'archived' && !isArchived)) {
+                    return;
+                }
+                
                 const card = document.createElement('div');
                 card.className = 'mode-card glass rounded-xl p-2 cursor-pointer';
+                
+                const archiveIcon = isArchived ? '✅' : '📦';
+                const archiveText = isArchived ? 'Активировать' : 'Архивировать';
+                
                 card.innerHTML = `
                     <div class="text-white font-bold mb-2 text-sm">${name}</div>
-                    <div class="flex gap-1">
+                    <div class="flex gap-1 mb-1">
                         <button onclick="selectMode(${index})" 
                                 class="flex-1 bg-green-500 hover:bg-green-600 text-white text-xs py-1 px-1 rounded">
                             Выбрать
@@ -391,6 +452,10 @@ const modeNames = [
                             ⚙️
                         </button>
                     </div>
+                    <button onclick="toggleArchive(${index}, event)" 
+                            class="w-full bg-orange-500 hover:bg-orange-600 text-white text-xs py-1 px-1 rounded">
+                        ${archiveIcon} ${archiveText}
+                    </button>
                 `;
                 grid.appendChild(card);
             });
@@ -398,7 +463,6 @@ const modeNames = [
 
         // Initialize on load
         window.addEventListener('DOMContentLoaded', () => {
-            initModes();
             loadState();
             // Refresh state every 5 seconds
             setInterval(loadState, 5000);
