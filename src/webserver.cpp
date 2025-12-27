@@ -157,7 +157,7 @@ void handleSetModeSettings() {
   }
   
   if (server.hasArg("plain")) {
-    StaticJsonDocument<200> doc;
+    StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
     
     if (!error && doc.containsKey("modeId")) {
@@ -173,6 +173,17 @@ void handleSetModeSettings() {
       }
       if (doc.containsKey("scale")) {
         ledState.modeSettings[modeId].scale = doc["scale"];
+      }
+      if (doc.containsKey("brightness")) {
+        ledState.modeSettings[modeId].brightness = doc["brightness"];
+      }
+      if (doc.containsKey("color1")) {
+        JsonObject color1 = doc["color1"];
+        ledState.modeSettings[modeId].color1 = CRGB(color1["r"], color1["g"], color1["b"]);
+      }
+      if (doc.containsKey("color2")) {
+        JsonObject color2 = doc["color2"];
+        ledState.modeSettings[modeId].color2 = CRGB(color2["r"], color2["g"], color2["b"]);
       }
       saveLEDState();
       server.send(200, "application/json", "{\"success\":true}");

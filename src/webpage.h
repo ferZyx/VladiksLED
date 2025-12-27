@@ -25,8 +25,14 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             background-color: #10b981;
             border-color: #10b981;
         }
-        .toggle-checkbox:checked + .toggle-label {
+        .toggle-checkbox:checked ~ .toggle-label {
             transform: translateX(100%);
+        }
+        .toggle-bg {
+            transition: background-color 0.3s ease;
+        }
+        .toggle-label {
+            transition: transform 0.3s ease;
         }
         .mode-card {
             transition: all 0.3s ease;
@@ -37,33 +43,36 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
         }
         .mode-card.active {
             border: 2px solid #10b981;
-            box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.6);
+            background: rgba(16, 185, 129, 0.15);
+            transform: scale(1.02);
         }
     </style>
 </head>
-<body class="p-4">
+<body class="p-2">
     <div class="max-w-6xl mx-auto">
         <!-- Header -->
-        <div class="glass rounded-2xl shadow-2xl p-6 mb-6">
-            <h1 class="text-4xl font-bold text-white mb-6 text-center">
-                🎄 WiFi LED Garland
-            </h1>
-            
-            <!-- Power Toggle -->
-            <div class="flex items-center justify-between mb-6 p-4 bg-white bg-opacity-10 rounded-xl">
-                <span class="text-white text-xl font-semibold">⚡ Питание</span>
-                <div class="relative">
-                    <input type="checkbox" id="powerToggle" class="toggle-checkbox sr-only" checked>
-                    <div class="block bg-gray-600 w-14 h-8 rounded-full cursor-pointer" onclick="togglePower()"></div>
-                    <div class="toggle-label absolute left-1 top-1 bg-white w-6 h-6 rounded-full transition transform cursor-pointer" onclick="togglePower()"></div>
+        <div class="glass rounded-2xl shadow-2xl p-3 mb-3">
+            <!-- Title and Power Toggle on same line -->
+            <div class="flex items-center justify-between mb-3">
+                <h1 class="text-2xl md:text-3xl font-bold text-white">
+                    🎄 WiFi LED Garland
+                </h1>
+                <div class="flex items-center gap-2">
+                    <span class="text-white text-sm md:text-base font-semibold">⚡</span>
+                    <div class="relative">
+                        <input type="checkbox" id="powerToggle" class="toggle-checkbox sr-only" checked>
+                        <div class="toggle-bg block bg-gray-600 w-14 h-8 rounded-full cursor-pointer" onclick="togglePower()"></div>
+                        <div class="toggle-label absolute left-1 top-1 bg-white w-6 h-6 rounded-full cursor-pointer" onclick="togglePower()"></div>
+                    </div>
                 </div>
             </div>
 
             <!-- Brightness Slider -->
-            <div class="mb-6 p-4 bg-white bg-opacity-10 rounded-xl">
+            <div class="mb-3 p-2 bg-white bg-opacity-10 rounded-xl">
                 <div class="flex items-center justify-between mb-2">
-                    <span class="text-white text-xl font-semibold">☀️ Яркость</span>
-                    <span class="text-white text-lg" id="brightnessValue">50%</span>
+                    <span class="text-white text-base font-semibold">☀️ Яркость</span>
+                    <span class="text-white text-sm" id="brightnessValue">50%</span>
                 </div>
                 <input type="range" id="brightnessSlider" min="0" max="255" value="128" 
                        class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
@@ -71,26 +80,33 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             </div>
 
             <!-- LED Count -->
-            <div class="mb-6 p-4 bg-white bg-opacity-10 rounded-xl">
+            <div class="mb-3 p-2 bg-white bg-opacity-10 rounded-xl">
                 <div class="flex items-center justify-between">
-                    <span class="text-white text-xl font-semibold">💡 Количество диодов</span>
+                    <span class="text-white text-base font-semibold">💡 Количество диодов</span>
                     <input type="number" id="ledCount" min="1" max="300" value="50"
-                           class="bg-white bg-opacity-20 text-white px-4 py-2 rounded-lg w-24 text-center"
+                           class="bg-white bg-opacity-20 text-white px-3 py-1 rounded-lg w-20 text-center text-sm"
                            onchange="updateLEDCount(this.value)">
                 </div>
             </div>
 
             <!-- Settings Button -->
             <button onclick="openSettings()" 
-                    class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-xl transition duration-300">
+                    class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-xl transition duration-300">
                 ⚙️ Настройки
             </button>
         </div>
 
         <!-- Modes Grid -->
-        <div class="glass rounded-2xl shadow-2xl p-6">
-            <h2 class="text-2xl font-bold text-white mb-4">🎨 Режимы свечения</h2>
-            <div id="modesGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+        <div class="glass rounded-2xl shadow-2xl p-3">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xl font-bold text-white">🎨 Режимы свечения</h2>
+            </div>
+            <div class="mb-3 p-2 bg-white bg-opacity-10 rounded-xl">
+                <span class="text-white text-sm font-semibold">Активный режим: </span>
+                <span class="text-white text-sm" id="currentModeName">-</span>
+                <span class="text-white text-xs opacity-75 ml-1" id="currentModeIndex">(0/41)</span>
+            </div>
+            <div id="modesGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
                 <!-- Modes will be loaded here -->
             </div>
         </div>
@@ -129,28 +145,46 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 
     <!-- Mode Settings Modal -->
     <div id="modeSettingsModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
-        <div class="glass rounded-2xl p-6 m-4 max-w-md w-full">
-            <h2 class="text-2xl font-bold text-white mb-4" id="modeSettingsTitle">Настройки режима</h2>
+        <div class="glass rounded-2xl p-4 m-4 max-w-md w-full">
+            <h2 class="text-xl font-bold text-white mb-3" id="modeSettingsTitle">Настройки режима</h2>
             
-            <div class="mb-4">
-                <label class="text-white block mb-2">Скорость</label>
+            <div class="mb-3">
+                <label class="text-white block mb-1 text-sm">Скорость</label>
                 <input type="range" id="modeSpeed" min="0" max="255" value="128"
                        class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer">
             </div>
 
-            <div class="mb-4">
-                <label class="text-white block mb-2">Масштаб</label>
+            <div class="mb-3">
+                <label class="text-white block mb-1 text-sm">Масштаб</label>
                 <input type="range" id="modeScale" min="0" max="255" value="128"
                        class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer">
             </div>
 
+            <div class="mb-3">
+                <label class="text-white block mb-1 text-sm">Яркость режима</label>
+                <input type="range" id="modeBrightness" min="0" max="255" value="255"
+                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer">
+            </div>
+
+            <div class="mb-3">
+                <label class="text-white block mb-1 text-sm">Цвет 1</label>
+                <input type="color" id="modeColor1" value="#ff0000"
+                       class="w-full h-10 rounded-lg cursor-pointer">
+            </div>
+
+            <div class="mb-3">
+                <label class="text-white block mb-1 text-sm">Цвет 2</label>
+                <input type="color" id="modeColor2" value="#0000ff"
+                       class="w-full h-10 rounded-lg cursor-pointer">
+            </div>
+
             <div class="flex gap-2">
                 <button onclick="saveModeSettings()" 
-                        class="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg">
+                        class="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
                     Применить
                 </button>
                 <button onclick="closeModeSettings()" 
-                        class="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg">
+                        class="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
                     Закрыть
                 </button>
             </div>
@@ -171,15 +205,8 @@ const modeNames = [
 ];
 
         let currentModeId = 0;
-        let debounceTimer = null;
-
-        // Debounce function
-        function debounce(func, wait) {
-            return function executedFunction(...args) {
-                clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(() => func(...args), wait);
-            };
-        }
+        let brightnessDebounceTimer = null;
+        let ledCountDebounceTimer = null;
 
         // API calls
         async function apiCall(endpoint, data = null) {
@@ -198,31 +225,45 @@ const modeNames = [
             }
         }
 
+        // Update power toggle visual state
+        function updatePowerToggleUI(isOn) {
+            const checkbox = document.getElementById('powerToggle');
+            const toggleBg = document.querySelector('.toggle-bg');
+            checkbox.checked = isOn;
+            if (isOn) {
+                toggleBg.classList.remove('bg-gray-600');
+                toggleBg.classList.add('bg-green-500');
+            } else {
+                toggleBg.classList.remove('bg-green-500');
+                toggleBg.classList.add('bg-gray-600');
+            }
+        }
+
         // Toggle power
         async function togglePower() {
             const checkbox = document.getElementById('powerToggle');
-            checkbox.checked = !checkbox.checked;
-            await apiCall('/api/power', { on: checkbox.checked });
+            const newState = !checkbox.checked;
+            updatePowerToggleUI(newState);
+            await apiCall('/api/power', { on: newState });
         }
 
         // Update brightness with debounce
-        const debouncedBrightness = debounce(async (value) => {
-            await apiCall('/api/brightness', { value: parseInt(value) });
-        }, 300);
-
         function updateBrightness(value) {
             const percent = Math.round((value / 255) * 100);
             document.getElementById('brightnessValue').textContent = percent + '%';
-            debouncedBrightness(value);
+            
+            clearTimeout(brightnessDebounceTimer);
+            brightnessDebounceTimer = setTimeout(async () => {
+                await apiCall('/api/brightness', { value: parseInt(value) });
+            }, 300);
         }
 
         // Update LED count with debounce
-        const debouncedLEDCount = debounce(async (value) => {
-            await apiCall('/api/leds', { count: parseInt(value) });
-        }, 500);
-
         function updateLEDCount(value) {
-            debouncedLEDCount(value);
+            clearTimeout(ledCountDebounceTimer);
+            ledCountDebounceTimer = setTimeout(async () => {
+                await apiCall('/api/leds', { count: parseInt(value) });
+            }, 500);
         }
 
         // Select mode
@@ -241,6 +282,25 @@ const modeNames = [
                     card.classList.remove('active');
                 }
             });
+            
+            // Update current mode display
+            document.getElementById('currentModeName').textContent = modeNames[currentModeId];
+            document.getElementById('currentModeIndex').textContent = `(${currentModeId + 1}/${modeNames.length})`;
+        }
+
+        // Helper function to convert RGB to hex
+        function rgbToHex(r, g, b) {
+            return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+        }
+
+        // Helper function to convert hex to RGB
+        function hexToRgb(hex) {
+            const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+            return result ? {
+                r: parseInt(result[1], 16),
+                g: parseInt(result[2], 16),
+                b: parseInt(result[3], 16)
+            } : null;
         }
 
         // Open mode settings
@@ -259,10 +319,20 @@ const modeNames = [
         async function saveModeSettings() {
             const speed = document.getElementById('modeSpeed').value;
             const scale = document.getElementById('modeScale').value;
+            const brightness = document.getElementById('modeBrightness').value;
+            const color1Hex = document.getElementById('modeColor1').value;
+            const color2Hex = document.getElementById('modeColor2').value;
+            
+            const color1 = hexToRgb(color1Hex);
+            const color2 = hexToRgb(color2Hex);
+            
             await apiCall('/api/mode/settings', {
                 modeId: currentModeId,
                 speed: parseInt(speed),
-                scale: parseInt(scale)
+                scale: parseInt(scale),
+                brightness: parseInt(brightness),
+                color1: color1,
+                color2: color2
             });
             closeModeSettings();
         }
@@ -292,7 +362,7 @@ const modeNames = [
         async function loadState() {
             const state = await apiCall('/api/state');
             if (state) {
-                document.getElementById('powerToggle').checked = state.power;
+                updatePowerToggleUI(state.power);
                 document.getElementById('brightnessSlider').value = state.brightness;
                 document.getElementById('ledCount').value = state.numLeds;
                 document.getElementById('autoSwitchDelay').value = state.autoSwitchDelay;
@@ -308,16 +378,16 @@ const modeNames = [
             const grid = document.getElementById('modesGrid');
             modeNames.forEach((name, index) => {
                 const card = document.createElement('div');
-                card.className = 'mode-card glass rounded-xl p-4 cursor-pointer';
+                card.className = 'mode-card glass rounded-xl p-2 cursor-pointer';
                 card.innerHTML = `
-                    <div class="text-white font-bold mb-2">${name}</div>
-                    <div class="flex gap-2">
+                    <div class="text-white font-bold mb-2 text-sm">${name}</div>
+                    <div class="flex gap-1">
                         <button onclick="selectMode(${index})" 
-                                class="flex-1 bg-green-500 hover:bg-green-600 text-white text-sm py-1 px-2 rounded">
+                                class="flex-1 bg-green-500 hover:bg-green-600 text-white text-xs py-1 px-1 rounded">
                             Выбрать
                         </button>
                         <button onclick="openModeSettings(${index}); event.stopPropagation();" 
-                                class="bg-blue-500 hover:bg-blue-600 text-white text-sm py-1 px-2 rounded">
+                                class="bg-blue-500 hover:bg-blue-600 text-white text-xs py-1 px-2 rounded">
                             ⚙️
                         </button>
                     </div>
