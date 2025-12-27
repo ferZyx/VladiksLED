@@ -133,7 +133,13 @@ void loop() {
   
   // Запуск текущего режима LED
   EVERY_N_MILLISECONDS(20) {
+    // Set brightness once per frame to avoid flickering
+    FastLED.setBrightness(ledState.brightness);
+    
     runMode(ledState.currentMode);
+    
+    // Show the frame
+    FastLED.show();
   }
   
   // Авто-переключение режимов

@@ -26,7 +26,16 @@ void initLEDState() {
 void saveLEDState() {
   // Сохранение в EEPROM
   EEPROM.begin(512);
-  EEPROM.put(0, ledState);
+  
+  // Сохраняем заголовок с магическим числом
+  EEPROMHeader header;
+  header.magic = EEPROM_MAGIC;
+  header.version = EEPROM_VERSION;
+  EEPROM.put(0, header);
+  
+  // Сохраняем состояние LED после заголовка
+  EEPROM.put(sizeof(EEPROMHeader), ledState);
+  
   EEPROM.commit();
   EEPROM.end();
 }
@@ -35,19 +44,22 @@ void loadLEDState() {
   // Загрузка из EEPROM
   EEPROM.begin(512);
   
-  // Проверяем, есть ли сохраненные данные
-  uint8_t magic;
-  EEPROM.get(0, magic);
+  // Читаем заголовок
+  EEPROMHeader header;
+  EEPROM.get(0, header);
   
-  if (magic == 0x55) { // Магическое число для проверки инициализации
-    EEPROM.get(0, ledState);
+  // Проверяем магическое число
+  if (header.magic == EEPROM_MAGIC && header.version == EEPROM_VERSION) {
+    // Данные валидны - загружаем состояние
+    EEPROM.get(sizeof(EEPROMHeader), ledState);
+    Serial.println("✅ LED state loaded from EEPROM");
   } else {
-    // Первый запуск - инициализируем и сохраняем
+    // Первый запуск или неверные данные - инициализируем и сохраняем
+    Serial.println("⚠️ No valid EEPROM data found, initializing defaults");
     initLEDState();
-    ledState.brightness = 0x55; // Временно устанавливаем magic byte
-    EEPROM.put(0, ledState);
-    EEPROM.commit();
-    ledState.brightness = DEFAULT_BRIGHTNESS; // Возвращаем нормальную яркость
+    EEPROM.end();
+    saveLEDState();  // Сохраняем с правильным заголовком
+    return;
   }
   
   EEPROM.end();

@@ -104,7 +104,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             <div class="mb-3 p-2 bg-white bg-opacity-10 rounded-xl">
                 <span class="text-white text-sm font-semibold">Активный режим: </span>
                 <span class="text-white text-sm" id="currentModeName">-</span>
-                <span class="text-white text-xs opacity-75 ml-1" id="currentModeIndex">(0/41)</span>
+                <span class="text-white text-xs opacity-75 ml-1" id="currentModeIndex">(0/10)</span>
             </div>
             
             <!-- Tabs for Active/Archived -->
@@ -182,9 +182,20 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
                        oninput="updateModeSettings()">
             </div>
 
+            <div class="mb-3">
+                <button id="archiveButton" onclick="toggleArchiveFromSettings()" 
+                        class="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
+                    📦 Архивировать
+                </button>
+            </div>
+
             <div class="flex gap-2">
+                <button onclick="resetModeSettings()" 
+                        class="flex-1 bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
+                    🔄 По умолчанию
+                </button>
                 <button onclick="closeModeSettings()" 
-                        class="w-full bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
+                        class="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
                     Закрыть
                 </button>
             </div>
@@ -192,16 +203,18 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     </div>
 
     <script>
-        // Mode names
+        // Названия режимов
 const modeNames = [
-    "Blendwave", "Rainbow Beat", "Two Sin", "One Sin Pal", "Noise8 Pal",
-    "Two Sin 2", "One Sin Pal 2", "Juggle Pal", "Matrix Pal", "Two Sin 3",
-    "One Sin Pal 3", "Three Sin Pal", "Serendipitous", "One Sin Pal 4", "Two Sin 4",
-    "Matrix Pal 2", "Noise8 Pal 2", "Plasma", "Two Sin 5", "Rainbow March",
-    "Three Sin Pal 2", "Rainbow March 2", "Noise16 Pal", "One Sin Pal 5", "Plasma 2",
-    "Confetti Pal", "Two Sin 6", "Matrix Pal 3", "One Sin Pal 6", "Confetti Pal 2",
-    "Plasma 3", "Juggle Pal 2", "One Sin Pal 7", "Three Sin Pal 3", "Rainbow March 3",
-    "Plasma 4", "Confetti Pal 3", "Noise16 Pal 2", "Noise8 Pal 3", "Fire", "Candles"
+    "Смешанные волны",    // Blendwave
+    "Радужная пульсация", // Rainbow Beat
+    "Две синусоиды",      // Two Sin
+    "Конфетти",           // Confetti
+    "Огонь",              // Fire
+    "Радужный марш",      // Rainbow March
+    "Плазма",             // Plasma
+    "Шум",                // Noise
+    "Жонглирование",      // Juggle
+    "Один цвет"           // Solid Color
 ];
 
         let currentModeId = 0;
@@ -278,8 +291,10 @@ const modeNames = [
 
         // Update mode cards visual state
         function updateModeCards() {
-            document.querySelectorAll('.mode-card').forEach((card, index) => {
-                if (index === currentModeId) {
+            // Highlight active mode card
+            document.querySelectorAll('.mode-card').forEach((card) => {
+                const cardModeId = parseInt(card.getAttribute('data-mode-id'));
+                if (cardModeId === currentModeId) {
                     card.classList.add('active');
                 } else {
                     card.classList.remove('active');
@@ -287,8 +302,24 @@ const modeNames = [
             });
             
             // Update current mode display
+            const isCurrentModeArchived = modeSettingsCache[currentModeId]?.archived || false;
+            
+            // Count active or archived modes depending on current mode status
+            let visibleModes = [];
+            let currentPosition = 0;
+            
+            for (let i = 0; i < modeNames.length; i++) {
+                const isArchived = modeSettingsCache[i]?.archived || false;
+                if (isArchived === isCurrentModeArchived) {
+                    visibleModes.push(i);
+                    if (i === currentModeId) {
+                        currentPosition = visibleModes.length;
+                    }
+                }
+            }
+            
             document.getElementById('currentModeName').textContent = modeNames[currentModeId];
-            document.getElementById('currentModeIndex').textContent = `(${currentModeId + 1}/${modeNames.length})`;
+            document.getElementById('currentModeIndex').textContent = `(${currentPosition}/${visibleModes.length})`;
         }
 
         // Helper function to convert RGB to hex
@@ -317,6 +348,18 @@ const modeNames = [
                 document.getElementById('modeSpeed').value = settings.speed;
                 document.getElementById('modeScale').value = settings.scale;
                 document.getElementById('modeBrightness').value = settings.brightness;
+                
+                // Update archive button text
+                const archiveBtn = document.getElementById('archiveButton');
+                if (settings.archived) {
+                    archiveBtn.textContent = '✅ Активировать';
+                    archiveBtn.classList.remove('bg-orange-500', 'hover:bg-orange-600');
+                    archiveBtn.classList.add('bg-green-500', 'hover:bg-green-600');
+                } else {
+                    archiveBtn.textContent = '📦 Архивировать';
+                    archiveBtn.classList.remove('bg-green-500', 'hover:bg-green-600');
+                    archiveBtn.classList.add('bg-orange-500', 'hover:bg-orange-600');
+                }
             }
             
             document.getElementById('modeSettingsModal').classList.remove('hidden');
@@ -409,16 +452,35 @@ const modeNames = [
             renderModes();
         }
         
-        // Toggle archive status
-        async function toggleArchive(modeId, event) {
-            event.stopPropagation();
-            const isArchived = modeSettingsCache[modeId]?.archived || false;
+        // Toggle archive status from settings modal
+        async function toggleArchiveFromSettings() {
+            const isArchived = modeSettingsCache[currentModeId]?.archived || false;
             await apiCall('/api/mode/archive', {
-                modeId: modeId,
+                modeId: currentModeId,
                 archived: !isArchived
+            });
+            // Reload state to update cache and UI
+            await loadState();
+            // Close modal if mode was archived and we're on active tab
+            if (!isArchived && currentTab === 'active') {
+                closeModeSettings();
+            } else if (isArchived && currentTab === 'archived') {
+                closeModeSettings();
+            } else {
+                // Reopen to update button text
+                openModeSettings(currentModeId);
+            }
+        }
+        
+        // Reset mode settings to defaults
+        async function resetModeSettings() {
+            await apiCall('/api/mode/reset', {
+                modeId: currentModeId
             });
             // Reload state to update cache
             await loadState();
+            // Reopen modal to show updated values
+            openModeSettings(currentModeId);
         }
         
         // Render modes based on current tab
@@ -436,13 +498,11 @@ const modeNames = [
                 
                 const card = document.createElement('div');
                 card.className = 'mode-card glass rounded-xl p-2 cursor-pointer';
-                
-                const archiveIcon = isArchived ? '✅' : '📦';
-                const archiveText = isArchived ? 'Активировать' : 'Архивировать';
+                card.setAttribute('data-mode-id', index); // Store actual mode ID
                 
                 card.innerHTML = `
                     <div class="text-white font-bold mb-2 text-sm">${name}</div>
-                    <div class="flex gap-1 mb-1">
+                    <div class="flex gap-1">
                         <button onclick="selectMode(${index})" 
                                 class="flex-1 bg-green-500 hover:bg-green-600 text-white text-xs py-1 px-1 rounded">
                             Выбрать
@@ -452,10 +512,6 @@ const modeNames = [
                             ⚙️
                         </button>
                     </div>
-                    <button onclick="toggleArchive(${index}, event)" 
-                            class="w-full bg-orange-500 hover:bg-orange-600 text-white text-xs py-1 px-1 rounded">
-                        ${archiveIcon} ${archiveText}
-                    </button>
                 `;
                 grid.appendChild(card);
             });

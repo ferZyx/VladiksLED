@@ -29,6 +29,7 @@ void setupWebServer() {
   server.on("/api/mode", HTTP_POST, handleSetMode);
   server.on("/api/mode/settings/get", HTTP_GET, handleGetModeSettings);
   server.on("/api/mode/settings", HTTP_POST, handleSetModeSettings);
+  server.on("/api/mode/reset", HTTP_POST, handleResetModeSettings);
   server.on("/api/mode/archive", HTTP_POST, handleToggleModeArchive);
   server.on("/api/auto-switch", HTTP_POST, handleSetAutoSwitch);
   
@@ -220,6 +221,39 @@ void handleGetModeSettings() {
   }
   
   server.send(400, "application/json", "{\"error\":\"Missing modeId parameter\"}");
+}
+
+void handleResetModeSettings() {
+  if (!checkThrottle()) {
+    server.send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  if (server.hasArg("plain")) {
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    
+    if (!error && doc.containsKey("modeId")) {
+      int modeId = doc["modeId"];
+      
+      if (modeId < 0 || modeId >= TOTAL_MODES) {
+        server.send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
+        return;
+      }
+      
+      // Reset to default values
+      ledState.modeSettings[modeId].speed = 128;
+      ledState.modeSettings[modeId].scale = 128;
+      ledState.modeSettings[modeId].brightness = 255;
+      // Don't reset archived status or colors
+      
+      saveLEDState();
+      server.send(200, "application/json", "{\"success\":true}");
+      return;
+    }
+  }
+  
+  server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
 }
 
 void handleToggleModeArchive() {

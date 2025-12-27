@@ -18,6 +18,7 @@ void handleSetLEDs();
 void handleSetMode();
 void handleGetModeSettings();
 void handleSetModeSettings();
+void handleResetModeSettings();
 void handleToggleModeArchive();
 void handleSetAutoSwitch();
 void handleNotFound();

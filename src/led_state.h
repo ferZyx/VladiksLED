@@ -4,6 +4,15 @@
 #include <Arduino.h>
 #include <FastLED.h>
 
+// EEPROM validation structure
+struct EEPROMHeader {
+  uint32_t magic;    // Magic number: 0x4C454456 ("LEDV")
+  uint8_t version;   // Data structure version
+};
+
+#define EEPROM_MAGIC 0x4C454456  // "LEDV" in hex
+#define EEPROM_VERSION 1
+
 // Настройки режима
 struct ModeSettings {
   uint8_t speed;          // Скорость (0-255)
