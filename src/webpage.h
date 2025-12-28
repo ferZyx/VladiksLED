@@ -623,6 +623,9 @@ const modeNames = [
                 `;
                 grid.appendChild(card);
             });
+            
+            // Update the current mode display after rendering cards
+            updateModeCards();
         }
 
         // Schedule functions

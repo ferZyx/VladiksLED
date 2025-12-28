@@ -10,6 +10,21 @@
 #include "led_modes.h"
 #include "webserver.h"
 #include "logger.h"
+#include "diagnostics.h"
+
+// Названия режимов (должны совпадать с frontend)
+const char* MODE_NAMES[] = {
+  "Смешанные волны",    // Blendwave
+  "Радужная пульсация", // Rainbow Beat
+  "Две синусоиды",      // Two Sin
+  "Конфетти",           // Confetti
+  "Огонь",              // Fire
+  "Радужный марш",      // Rainbow March
+  "Плазма",             // Plasma
+  "Шум",                // Noise
+  "Жонглирование",      // Juggle
+  "Один цвет"           // Solid Color
+};
 
 // Авто-переключение режимов
 unsigned long lastModeSwitch = 0;
@@ -281,11 +296,17 @@ void checkSchedules() {
 }
 
 void loop() {
+  diag.loopStart();
+
   // Обработка OTA запросов
+  diag.taskStart("OTA");
   ArduinoOTA.handle();
+  diag.taskEnd();
   
   // Обработка HTTP запросов
+  diag.taskStart("WebServer");
   handleWebServer();
+  diag.taskEnd();
   
   // Ресинхронизация времени каждый час через HTTP
   EVERY_N_SECONDS(3600) {
@@ -299,7 +320,9 @@ void loop() {
   
   // Проверка расписаний каждую секунду
   EVERY_N_SECONDS(1) {
+    diag.taskStart("Schedules");
     checkSchedules();
+    diag.taskEnd();
   }
   
   // Set brightness once per frame to avoid flickering
@@ -307,10 +330,20 @@ void loop() {
   
   // Запуск текущего режима LED
   EVERY_N_MILLISECONDS(20) {
-    runMode(ledState.currentMode);
+    diag.taskStart("LEDs");
+    
+    // Check if time is synchronized (year > 2001)
+    if (time(nullptr) > 1000000000) {
+      runMode(ledState.currentMode);
+    } else {
+      // Time not synced yet - show solid green to indicate waiting state
+      // This matches the "success connection" color, keeping it until we get time
+      fill_solid(leds, ledState.numLeds, CRGB::Green);
+    }
     
     // Show the frame
     FastLED.show();
+    diag.taskEnd();
   }
   
   // Авто-переключение режимов
@@ -337,25 +370,47 @@ void loop() {
           ledState.currentMode = activeModes[randomIndex];
         } else {
           // Следующий по порядку среди активных
-          bool found = false;
+          // Ищем текущий режим в массиве активных
+          int currentIndex = -1;
           for (uint8_t i = 0; i < activeCount; i++) {
-            if (activeModes[i] > ledState.currentMode) {
-              ledState.currentMode = activeModes[i];
-              found = true;
+            if (activeModes[i] == ledState.currentMode) {
+              currentIndex = i;
               break;
             }
           }
-          // Если не нашли следующий, берем первый активный
-          if (!found) {
-            ledState.currentMode = activeModes[0];
+          
+          // Переключаемся на следующий в списке активных
+          if (currentIndex >= 0) {
+            // Текущий режим найден, берем следующий (с циклом)
+            currentIndex = (currentIndex + 1) % activeCount;
+          } else {
+            // Текущий режим не в списке активных (возможно архивирован), берем первый
+            currentIndex = 0;
           }
+          
+          ledState.currentMode = activeModes[currentIndex];
         }
         
-        LOG_PRINT("Auto-switched to mode: ");
-        LOG_PRINTLN(String(ledState.currentMode));
         
-        saveLEDState();
+        // Проверка границ для безопасности
+        if (ledState.currentMode >= TOTAL_MODES) {
+          ledState.currentMode = 0;  // Fallback to first mode
+        }
+        
+        // Используем sprintf вместо String для избежания фрагментации кучи
+        char logMsg[100];
+        snprintf(logMsg, sizeof(logMsg), "Auto-switched to mode: %s (%d)", 
+                 MODE_NAMES[ledState.currentMode], 
+                 ledState.currentMode);
+        LOG_PRINTLN(logMsg);
+        
+        // НЕ сохраняем в EEPROM при автопереключении!
+        // Частые записи в EEPROM вызывают watchdog reset и крэши.
+        // Режим сохраняется только при ручном выборе через веб-интерфейс.
+        // saveLEDState();  // ← REMOVED to prevent crashes
       }
     }
   }
+  
+  diag.loopEnd();
 }

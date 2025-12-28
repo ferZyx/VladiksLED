@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <FastLED.h>
+#include "config.h"
 
 // EEPROM validation structure
 struct EEPROMHeader {
@@ -11,7 +12,7 @@ struct EEPROMHeader {
 };
 
 #define EEPROM_MAGIC 0x4C454456  // "LEDV" in hex
-#define EEPROM_VERSION 2
+#define EEPROM_VERSION 3
 
 // Структура расписания
 struct Schedule {
@@ -40,7 +41,7 @@ struct LEDState {
   uint8_t currentMode;            // Текущий режим (0-40)
   uint16_t autoSwitchDelay;       // Delay переключения в секундах (0 = выкл)
   bool randomOrder;               // Случайный порядок режимов
-  ModeSettings modeSettings[41];  // Настройки каждого из 41 режимов
+  ModeSettings modeSettings[TOTAL_MODES];  // Настройки каждого из режимов
   Schedule schedules[10];         // Расписания включения/выключения
 };
 
