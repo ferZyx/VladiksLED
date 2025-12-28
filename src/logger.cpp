@@ -50,9 +50,17 @@ void Logger::log(const char* message) {
 
 void Logger::broadcast(const String& message) {
   if (ws != nullptr && ws->count() > 0) {
+    // Экранируем специальные символы в сообщении для JSON
+    String escapedMsg = message;
+    escapedMsg.replace("\\", "\\\\");
+    escapedMsg.replace("\"", "\\\"");
+    escapedMsg.replace("\n", "\\n");
+    escapedMsg.replace("\r", "\\r");
+    escapedMsg.replace("\t", "\\t");
+    
     // Создаем JSON объект для отправки
     String timestamp = getTimestamp();
-    String json = "{\"timestamp\":\"" + timestamp + "\",\"message\":\"" + message + "\"}";
+    String json = "{\"timestamp\":\"" + timestamp + "\",\"message\":\"" + escapedMsg + "\"}";
     ws->textAll(json);
   }
 }

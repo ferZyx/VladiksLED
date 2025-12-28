@@ -3,6 +3,7 @@
 #include <EEPROM.h>
 
 LEDState ledState;
+volatile bool settingsChanged = false;
 
 void initLEDState() {
   ledState.power = true;

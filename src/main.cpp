@@ -82,6 +82,8 @@ bool syncTimeViaHTTP() {
 void setup() {
   Serial.begin(115200);
   LOG_PRINTLN("\n\n🎄 WiFi LED Garland Starting...");
+  LOG_PRINTLN("BOOT: System Restarted");
+  LOG_PRINTF("Reset Reason: %s\n", ESP.getResetReason().c_str());
   
   // Инициализация LED state
   initLEDState();
@@ -284,7 +286,7 @@ void checkSchedules() {
     
     // Выполняем действие
     ledState.power = schedule.action;
-    saveLEDState();
+    settingsChanged = true;
     
     LOG_PRINT("⏰ Schedule triggered: ");
     LOG_PRINT(schedule.action ? "ON" : "OFF");
@@ -412,5 +414,15 @@ void loop() {
     }
   }
   
+
+  
+  // Сохранение настроек в главном цикле (безопасно для EEPROM)
+  if (settingsChanged) {
+    LOG_PRINTLN("💾 Settings changed, saving to EEPROM...");
+    saveLEDState();
+    settingsChanged = false;
+    LOG_PRINTLN("✅ Settings saved");
+  }
+
   diag.loopEnd();
 }

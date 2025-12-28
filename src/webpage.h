@@ -322,7 +322,8 @@ const modeNames = [
     "Один цвет"           // Solid Color
 ];
 
-        let currentModeId = 0;
+        let currentModeId = 0;  // Currently active mode on device
+        let editingModeId = null;  // Mode currently being edited (null if settings modal closed)
         let brightnessDebounceTimer = null;
         let ledCountDebounceTimer = null;
         let modeSettingsDebounceTimer = null;
@@ -331,6 +332,11 @@ const modeNames = [
         let selectedDays = 0x7F;  // Битовая маска выбранных дней (по умолчанию все дни)
         let schedulesCache = [];  // Cache for schedules
         let currentTimeInterval = null;  // Interval for updating current time
+
+        // Debug logging helper
+        function debugLog(msg) {
+            console.log('[DEBUG] ' + msg);
+        }
 
         // API calls
         async function apiCall(endpoint, data = null) {
@@ -371,13 +377,20 @@ const modeNames = [
             await apiCall('/api/power', { on: newState });
         }
 
-        // Update brightness with debounce
-        function updateBrightness(value) {
+        // Update brightness UI only (no API call)
+        function updateBrightnessUI(value) {
             const percent = Math.round((value / 255) * 100);
             document.getElementById('brightnessValue').textContent = percent + '%';
+            document.getElementById('brightnessSlider').value = value;
+        }
+
+        // Update brightness with debounce (sends API call)
+        function updateBrightness(value) {
+            updateBrightnessUI(value);
             
             clearTimeout(brightnessDebounceTimer);
             brightnessDebounceTimer = setTimeout(async () => {
+                debugLog('updateBrightness: sending API call with value=' + value);
                 await apiCall('/api/brightness', { value: parseInt(value) });
             }, 300);
         }
@@ -392,8 +405,10 @@ const modeNames = [
 
         // Select mode
         async function selectMode(modeId) {
+            debugLog('selectMode: selecting mode ' + modeId + ' (was ' + currentModeId + ')');
             currentModeId = modeId;
-            await apiCall('/api/mode', { mode: modeId });
+            const result = await apiCall('/api/mode', { mode: modeId });
+            debugLog('selectMode: API result: ' + JSON.stringify(result));
             updateModeCards();
         }
 
@@ -447,12 +462,14 @@ const modeNames = [
 
         // Open mode settings
         async function openModeSettings(modeId) {
-            currentModeId = modeId;
+            editingModeId = modeId;  // Set editing mode (NOT currentModeId!)
+            debugLog('openModeSettings: editingModeId=' + editingModeId + ', currentModeId=' + currentModeId);
             document.getElementById('modeSettingsTitle').textContent = `${modeNames[modeId]} - Настройки`;
             
             // Load current settings from cache or server
             if (modeSettingsCache[modeId]) {
                 const settings = modeSettingsCache[modeId];
+                debugLog('Loading cached settings for mode ' + modeId + ': speed=' + settings.speed + ', scale=' + settings.scale + ', brightness=' + settings.brightness);
                 document.getElementById('modeSpeed').value = settings.speed;
                 document.getElementById('modeScale').value = settings.scale;
                 document.getElementById('modeBrightness').value = settings.brightness;
@@ -468,6 +485,8 @@ const modeNames = [
                     archiveBtn.classList.remove('bg-green-500', 'hover:bg-green-600');
                     archiveBtn.classList.add('bg-orange-500', 'hover:bg-orange-600');
                 }
+            } else {
+                debugLog('No cached settings for mode ' + modeId);
             }
             
             document.getElementById('modeSettingsModal').classList.remove('hidden');
@@ -475,6 +494,8 @@ const modeNames = [
         }
 
         function closeModeSettings() {
+            debugLog('closeModeSettings: was editing mode ' + editingModeId);
+            editingModeId = null;  // Clear editing mode
             document.getElementById('modeSettingsModal').classList.add('hidden');
             document.getElementById('modeSettingsModal').classList.remove('flex');
         }
@@ -483,16 +504,34 @@ const modeNames = [
         function updateModeSettings() {
             clearTimeout(modeSettingsDebounceTimer);
             modeSettingsDebounceTimer = setTimeout(async () => {
+                // CRITICAL: Use editingModeId, NOT currentModeId!
+                if (editingModeId === null) {
+                    debugLog('updateModeSettings: editingModeId is null, aborting!');
+                    return;
+                }
+                
                 const speed = document.getElementById('modeSpeed').value;
                 const scale = document.getElementById('modeScale').value;
                 const brightness = document.getElementById('modeBrightness').value;
                 
-                await apiCall('/api/mode/settings', {
-                    modeId: currentModeId,
+                debugLog('updateModeSettings: Sending settings for mode ' + editingModeId + ': speed=' + speed + ', scale=' + scale + ', brightness=' + brightness);
+                
+                const result = await apiCall('/api/mode/settings', {
+                    modeId: editingModeId,
                     speed: parseInt(speed),
                     scale: parseInt(scale),
                     brightness: parseInt(brightness)
                 });
+                
+                debugLog('updateModeSettings: API result: ' + JSON.stringify(result));
+                
+                // Update local cache
+                if (result && result.success && modeSettingsCache[editingModeId]) {
+                    modeSettingsCache[editingModeId].speed = parseInt(speed);
+                    modeSettingsCache[editingModeId].scale = parseInt(scale);
+                    modeSettingsCache[editingModeId].brightness = parseInt(brightness);
+                    debugLog('updateModeSettings: Local cache updated for mode ' + editingModeId);
+                }
             }, 300);
         }
 
@@ -519,23 +558,31 @@ const modeNames = [
 
         // Load state from ESP
         async function loadState() {
+            debugLog('loadState: fetching state... (editingModeId=' + editingModeId + ')');
             const state = await apiCall('/api/state');
             if (state) {
                 updatePowerToggleUI(state.power);
-                document.getElementById('brightnessSlider').value = state.brightness;
                 document.getElementById('ledCount').value = state.numLeds;
                 document.getElementById('autoSwitchDelay').value = state.autoSwitchDelay;
                 document.getElementById('randomOrder').checked = state.randomOrder;
+                
+                const prevModeId = currentModeId;
                 currentModeId = state.currentMode;
+                if (prevModeId !== currentModeId) {
+                    debugLog('loadState: currentModeId changed from ' + prevModeId + ' to ' + currentModeId);
+                }
                 
                 // Cache mode settings
                 if (state.modeSettings) {
                     modeSettingsCache = state.modeSettings;
+                    debugLog('loadState: modeSettingsCache updated, ' + modeSettingsCache.length + ' modes');
                 }
                 
-                updateBrightness(state.brightness);
+                updateBrightnessUI(state.brightness);  // UI only, no API call!
                 renderModes();
                 updateModeCards();
+            } else {
+                debugLog('loadState: failed to fetch state');
             }
         }
 
@@ -562,9 +609,16 @@ const modeNames = [
         
         // Toggle archive status from settings modal
         async function toggleArchiveFromSettings() {
-            const isArchived = modeSettingsCache[currentModeId]?.archived || false;
+            if (editingModeId === null) {
+                debugLog('toggleArchiveFromSettings: editingModeId is null, aborting!');
+                return;
+            }
+            const modeToArchive = editingModeId;  // Save before async call
+            const isArchived = modeSettingsCache[modeToArchive]?.archived || false;
+            debugLog('toggleArchiveFromSettings: mode=' + modeToArchive + ', isArchived=' + isArchived + ' -> ' + !isArchived);
+            
             await apiCall('/api/mode/archive', {
-                modeId: currentModeId,
+                modeId: modeToArchive,
                 archived: !isArchived
             });
             // Reload state to update cache and UI
@@ -576,19 +630,26 @@ const modeNames = [
                 closeModeSettings();
             } else {
                 // Reopen to update button text
-                openModeSettings(currentModeId);
+                openModeSettings(modeToArchive);
             }
         }
         
         // Reset mode settings to defaults
         async function resetModeSettings() {
+            if (editingModeId === null) {
+                debugLog('resetModeSettings: editingModeId is null, aborting!');
+                return;
+            }
+            const modeToReset = editingModeId;  // Save before async call
+            debugLog('resetModeSettings: resetting mode ' + modeToReset);
+            
             await apiCall('/api/mode/reset', {
-                modeId: currentModeId
+                modeId: modeToReset
             });
             // Reload state to update cache
             await loadState();
             // Reopen modal to show updated values
-            openModeSettings(currentModeId);
+            openModeSettings(modeToReset);
         }
         
         // Render modes based on current tab

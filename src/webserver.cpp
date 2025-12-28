@@ -79,21 +79,47 @@ void setupWebServer() {
   server.on("/api/debug", HTTP_GET, handleGetDebug);
   
   // API endpoints - POST requests with body
-  server.on("/api/power", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetPower);
-  server.on("/api/brightness", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetBrightness);
-  server.on("/api/leds", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetLEDs);
-  server.on("/api/mode", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetMode);
-  server.on("/api/mode/settings", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetModeSettings);
-  server.on("/api/mode/reset", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleResetModeSettings);
-  server.on("/api/mode/archive", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleToggleModeArchive);
-  server.on("/api/auto-switch", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetAutoSwitch);
-  server.on("/api/schedules", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetSchedule);
-  server.on("/api/time/set", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL, handleSetTime);
+  // Note: The first lambda is called when request completes (after body), 
+  // the body handler is the last parameter
+  // IMPORTANT: Register more specific routes FIRST (e.g., /api/mode/settings before /api/mode)
+  server.on("/api/power", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/power complete"); }, 
+    NULL, handleSetPower);
+  server.on("/api/brightness", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/brightness complete"); }, 
+    NULL, handleSetBrightness);
+  server.on("/api/leds", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/leds complete"); }, 
+    NULL, handleSetLEDs);
+  // Mode-related routes - more specific first!
+  server.on("/api/mode/settings", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/mode/settings complete"); }, 
+    NULL, handleSetModeSettings);
+  server.on("/api/mode/reset", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/mode/reset complete"); }, 
+    NULL, handleResetModeSettings);
+  server.on("/api/mode/archive", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/mode/archive complete"); }, 
+    NULL, handleToggleModeArchive);
+  server.on("/api/mode", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/mode complete"); }, 
+    NULL, handleSetMode);
+  // Other routes
+  server.on("/api/auto-switch", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/auto-switch complete"); }, 
+    NULL, handleSetAutoSwitch);
+  server.on("/api/schedules", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/schedules complete"); }, 
+    NULL, handleSetSchedule);
+  server.on("/api/time/set", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/time/set complete"); }, 
+    NULL, handleSetTime);
   
   // DELETE request
   server.on("/api/schedules", HTTP_DELETE, handleDeleteSchedule);
   
   server.onNotFound([](AsyncWebServerRequest *request){
+    LOG_PRINTF(">>> 404 NOT FOUND: %s %s\n", request->methodToString(), request->url().c_str());
     request->send(404, "text/plain", "Not Found");
   });
   
@@ -143,8 +169,9 @@ void handleSetPower(AsyncWebServerRequest *request, uint8_t *data, size_t len, s
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
   
   if (!error) {
+    LOG_PRINTF("API: Power set to %s\n", doc["on"] ? "ON" : "OFF");
     ledState.power = doc["on"];
-    saveLEDState();
+    settingsChanged = true;
     request->send(200, "application/json", "{\"success\":true}");
     return;
   }
@@ -162,8 +189,9 @@ void handleSetBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t l
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
   
   if (!error) {
+    LOG_PRINTF("API: Brightness set to %d\n", (int)doc["value"]);
     ledState.brightness = doc["value"];
-    saveLEDState();
+    settingsChanged = true;
     request->send(200, "application/json", "{\"success\":true}");
     return;
   }
@@ -184,7 +212,7 @@ void handleSetLEDs(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
     uint16_t count = doc["count"];
     if (count > 0 && count <= MAX_LEDS) {
       ledState.numLeds = count;
-      saveLEDState();
+      settingsChanged = true;
       request->send(200, "application/json", "{\"success\":true}");
       return;
     }
@@ -204,9 +232,10 @@ void handleSetMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
   
   if (!error) {
     uint8_t mode = doc["mode"];
+    LOG_PRINTF("API: Set Mode request: %d\n", mode);
     if (mode < TOTAL_MODES) {
       ledState.currentMode = mode;
-      saveLEDState();
+      settingsChanged = true;
       request->send(200, "application/json", "{\"success\":true}");
       return;
     }
@@ -216,37 +245,79 @@ void handleSetMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
 }
 
 void handleSetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  // FIRST: Log that request arrived (before ANY checks)
+  LOG_PRINTF(">>> handleSetModeSettings CALLED: len=%d, index=%d, total=%d\n", len, index, total);
+  
+  // Handle chunked body - only process when we have complete data
+  if (index + len != total) {
+    LOG_PRINTF("API: SetModeSettings - Chunked data, waiting for more (got %d/%d)\n", index + len, total);
+    return;  // Wait for more data
+  }
+  
   if (!checkThrottle()) {
+    LOG_PRINTLN("API: SetModeSettings - THROTTLED");
     request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
   
+  // Log raw request body for debugging
+  char rawBody[128];
+  size_t copyLen = len < 127 ? len : 127;
+  memcpy(rawBody, data, copyLen);
+  rawBody[copyLen] = '\0';
+  LOG_PRINTF("API: SetModeSettings - Raw body: %s\n", rawBody);
+  
   StaticJsonDocument<512> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
   
-  if (!error && doc.containsKey("modeId")) {
-    int modeId = doc["modeId"];
-    
-    if (modeId < 0 || modeId >= TOTAL_MODES) {
-      request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
-      return;
-    }
-    
-    if (doc.containsKey("speed")) {
-      ledState.modeSettings[modeId].speed = doc["speed"];
-    }
-    if (doc.containsKey("scale")) {
-      ledState.modeSettings[modeId].scale = doc["scale"];
-    }
-    if (doc.containsKey("brightness")) {
-      ledState.modeSettings[modeId].brightness = doc["brightness"];
-    }
-    saveLEDState();
-    request->send(200, "application/json", "{\"success\":true}");
+  if (error) {
+    LOG_PRINTF("API: SetModeSettings - JSON parse error: %s\n", error.c_str());
+    request->send(400, "application/json", "{\"error\":\"JSON parse error\"}");
     return;
   }
   
-  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+  if (!doc.containsKey("modeId")) {
+    LOG_PRINTLN("API: SetModeSettings - Missing modeId field");
+    request->send(400, "application/json", "{\"error\":\"Missing modeId\"}");
+    return;
+  }
+  
+  int modeId = doc["modeId"];
+  LOG_PRINTF("API: SetModeSettings - Mode %d, Heap: %u\n", modeId, ESP.getFreeHeap());
+  
+  if (modeId < 0 || modeId >= TOTAL_MODES) {
+    LOG_PRINTF("API: SetModeSettings - Invalid modeId: %d (max: %d)\n", modeId, TOTAL_MODES - 1);
+    request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
+    return;
+  }
+  
+  // Log current values before update
+  LOG_PRINTF("API: Mode %d BEFORE: speed=%d, scale=%d, brightness=%d\n", 
+             modeId, 
+             ledState.modeSettings[modeId].speed,
+             ledState.modeSettings[modeId].scale,
+             ledState.modeSettings[modeId].brightness);
+  
+  if (doc.containsKey("speed")) {
+    ledState.modeSettings[modeId].speed = doc["speed"];
+  }
+  if (doc.containsKey("scale")) {
+    ledState.modeSettings[modeId].scale = doc["scale"];
+  }
+  if (doc.containsKey("brightness")) {
+    ledState.modeSettings[modeId].brightness = doc["brightness"];
+  }
+  
+  // Log values after update
+  LOG_PRINTF("API: Mode %d AFTER: speed=%d, scale=%d, brightness=%d\n", 
+             modeId, 
+             ledState.modeSettings[modeId].speed,
+             ledState.modeSettings[modeId].scale,
+             ledState.modeSettings[modeId].brightness);
+  
+  settingsChanged = true;
+  LOG_PRINTF("API: SetModeSettings - Mode %d updated successfully, settingsChanged=true\n", modeId);
+  request->send(200, "application/json", "{\"success\":true}");
 }
 
 void handleGetModeSettings(AsyncWebServerRequest *request) {
@@ -274,7 +345,14 @@ void handleGetModeSettings(AsyncWebServerRequest *request) {
 }
 
 void handleResetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  LOG_PRINTF(">>> handleResetModeSettings CALLED: len=%d, index=%d, total=%d\n", len, index, total);
+  
+  if (index + len != total) {
+    return;  // Wait for complete data
+  }
+  
   if (!checkThrottle()) {
+    LOG_PRINTLN("API: ResetModeSettings - THROTTLED");
     request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
@@ -286,9 +364,12 @@ void handleResetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size
     int modeId = doc["modeId"];
     
     if (modeId < 0 || modeId >= TOTAL_MODES) {
+      LOG_PRINTF("API: Reset Settings - Invalid Mode %d\n", modeId);
       request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
       return;
     }
+
+    LOG_PRINTF("API: Reset Settings for Mode %d\n", modeId);
     
     // Reset to default values
     ledState.modeSettings[modeId].speed = 128;
@@ -296,7 +377,7 @@ void handleResetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size
     ledState.modeSettings[modeId].brightness = 255;
     // Don't reset archived status or colors
     
-    saveLEDState();
+    settingsChanged = true;
     request->send(200, "application/json", "{\"success\":true}");
     return;
   }
@@ -305,10 +386,24 @@ void handleResetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size
 }
 
 void handleToggleModeArchive(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  LOG_PRINTF(">>> handleToggleModeArchive CALLED: len=%d, index=%d, total=%d\n", len, index, total);
+  
+  if (index + len != total) {
+    return;  // Wait for complete data
+  }
+  
   if (!checkThrottle()) {
+    LOG_PRINTLN("API: ToggleModeArchive - THROTTLED");
     request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
     return;
   }
+  
+  // Log raw body
+  char rawBody[64];
+  size_t copyLen = len < 63 ? len : 63;
+  memcpy(rawBody, data, copyLen);
+  rawBody[copyLen] = '\0';
+  LOG_PRINTF("API: ToggleModeArchive - Raw body: %s\n", rawBody);
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -317,13 +412,15 @@ void handleToggleModeArchive(AsyncWebServerRequest *request, uint8_t *data, size
     int modeId = doc["modeId"];
     
     if (modeId < 0 || modeId >= TOTAL_MODES) {
+      LOG_PRINTF("API: Toggle Archive - Invalid Mode %d\n", modeId);
       request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
-      return;
+      return;;
     }
     
     bool archived = doc["archived"];
+    LOG_PRINTF("API: Set Archive Mode %d to %s\n", modeId, archived ? "TRUE" : "FALSE");
     ledState.modeSettings[modeId].archived = archived;
-    saveLEDState();
+    settingsChanged = true;
     request->send(200, "application/json", "{\"success\":true}");
     return;
   }
@@ -343,7 +440,8 @@ void handleSetAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t l
   if (!error) {
     ledState.autoSwitchDelay = doc["delay"];
     ledState.randomOrder = doc["random"];
-    saveLEDState();
+    LOG_PRINTF("API: AutoSwitch Delay=%d, Random=%d\n", ledState.autoSwitchDelay, ledState.randomOrder);
+    settingsChanged = true;
     request->send(200, "application/json", "{\"success\":true}");
     return;
   }
@@ -403,7 +501,9 @@ void handleSetSchedule(AsyncWebServerRequest *request, uint8_t *data, size_t len
       ledState.schedules[id].daysOfWeek = doc["daysOfWeek"];
     }
     
-    saveLEDState();
+    LOG_PRINTF("API: Set Schedule %d. Act=%d, Time=%d:%d\n", id, ledState.schedules[id].action, ledState.schedules[id].hour, ledState.schedules[id].minute);
+    
+    settingsChanged = true;
     request->send(200, "application/json", "{\"success\":true}");
     return;
   }
@@ -427,7 +527,7 @@ void handleDeleteSchedule(AsyncWebServerRequest *request) {
     
     // Отключаем расписание
     ledState.schedules[id].enabled = false;
-    saveLEDState();
+    settingsChanged = true;
     
     request->send(200, "application/json", "{\"success\":true}");
     return;

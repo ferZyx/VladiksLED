@@ -47,6 +47,7 @@ struct LEDState {
 
 // Глобальная переменная состояния
 extern LEDState ledState;
+extern volatile bool settingsChanged;
 
 // Функции для работы с состоянием
 void initLEDState();
