@@ -2,13 +2,13 @@
 #define CONFIG_H
 
 // WiFi настройки
-#define WIFI_SSID "TP-LINK_8E7C38"        // Замените на имя вашей WiFi сети
+#define WIFI_SSID "HUAWEI-2.4G-9y6Y"        // Замените на имя вашей WiFi сети
 #define WIFI_PASSWORD "877746046333" // Замените на пароль от WiFi
 
 // Статический IP (закомментируйте эти строки для использования DHCP)
 #define USE_STATIC_IP true
-#define STATIC_IP 192, 168, 1, 222
-#define GATEWAY_IP 192, 168, 1, 1
+#define STATIC_IP 192, 168, 100, 222
+#define GATEWAY_IP 192, 168, 100, 1
 #define SUBNET_MASK 255, 255, 255, 0
 
 // OTA настройки
