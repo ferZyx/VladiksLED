@@ -110,7 +110,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             <div class="mb-3 p-2 bg-white bg-opacity-10 rounded-xl">
                 <span class="text-white text-sm font-semibold">Активный режим: </span>
                 <span class="text-white text-sm" id="currentModeName">-</span>
-                <span class="text-white text-xs opacity-75 ml-1" id="currentModeIndex">(0/10)</span>
+                <span class="text-white text-xs opacity-75 ml-1" id="currentModeIndex">(-/-)</span>
             </div>
             
             <!-- Tabs for Active/Archived -->
@@ -319,7 +319,8 @@ const modeNames = [
     "Плазма",             // Plasma
     "Шум",                // Noise
     "Жонглирование",      // Juggle
-    "Один цвет"           // Solid Color
+    "Один цвет",          // Solid Color
+    "Снегопад"            // Snowfall
 ];
 
         let currentModeId = 0;  // Currently active mode on device

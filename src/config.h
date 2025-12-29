@@ -21,7 +21,7 @@
 #define DEFAULT_BRIGHTNESS 128  // Яркость по умолчанию (0-255)
 
 // Режимы работы
-#define TOTAL_MODES 10      // Общее количество режимов
+#define TOTAL_MODES 11      // Общее количество режимов
 
 // Web Server
 #define WEB_SERVER_PORT 80

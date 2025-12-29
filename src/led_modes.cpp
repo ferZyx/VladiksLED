@@ -29,6 +29,7 @@ void runMode(uint8_t mode) {
     case 7: mode_noise(); break;
     case 8: mode_juggle(); break;
     case 9: mode_solid_color(); break;
+    case 10: mode_snowfall(); break;
     
     default: mode_rainbow_beat(); break;
   }
@@ -219,4 +220,62 @@ void mode_juggle() {
 void mode_solid_color() {
   CRGB color = CRGB::White;
   fill_solid(leds, ledState.numLeds, color);
+}
+
+// Snowfall - падающий снег с мерцанием
+// Имитация снегопада: белые/голубые снежинки падают вниз и мерцают
+void mode_snowfall() {
+  uint8_t speed = ledState.modeSettings[ledState.currentMode].speed;
+  uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
+  
+  // Плотность снега: сколько снежинок генерируется (1-15)
+  uint8_t density = map(scale, 0, 255, 1, 15);
+  // Скорость падения (интервал в мс между шагами)
+  uint8_t fallSpeed = map(speed, 0, 255, 80, 8);
+  
+  // Статический массив для хранения позиций снежинок (яркость каждого LED)
+  static uint8_t snow[MAX_LEDS];
+  static unsigned long lastUpdate = 0;
+  
+  unsigned long now = millis();
+  
+  // Обновление позиций снежинок
+  if (now - lastUpdate >= fallSpeed) {
+    lastUpdate = now;
+    
+    // Сдвигаем все снежинки вниз (к большему индексу)
+    for (int i = ledState.numLeds - 1; i > 0; i--) {
+      snow[i] = snow[i - 1];
+    }
+    
+    // Генерируем новые снежинки в начале ленты
+    // Случайная генерация с учётом плотности
+    if (random8() < density * 12) {
+      snow[0] = random8(180, 255);  // Яркость новой снежинки
+    } else {
+      snow[0] = 0;
+    }
+  }
+  
+  // Отрисовка снежинок с мерцанием
+  for (int i = 0; i < ledState.numLeds; i++) {
+    if (snow[i] > 0) {
+      // Мерцание: добавляем случайное изменение яркости
+      uint8_t twinkle = snow[i];
+      if (random8() < 60) {
+        twinkle = qadd8(twinkle, random8(20, 50));  // Вспышка
+      }
+      if (random8() < 40) {
+        twinkle = qsub8(twinkle, random8(10, 30));  // Приглушение
+      }
+      
+      // Цвет снежинки: белый с лёгким голубым оттенком
+      // Hue 160-180 = голубой, низкая насыщенность = близко к белому
+      uint8_t hue = 160 + random8(20);      // Голубоватый оттенок
+      uint8_t sat = random8(0, 80);         // Низкая насыщенность (ближе к белому)
+      leds[i] = CHSV(hue, sat, twinkle);
+    } else {
+      leds[i] = CRGB::Black;
+    }
+  }
 }

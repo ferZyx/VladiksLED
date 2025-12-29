@@ -23,7 +23,8 @@ const char* MODE_NAMES[] = {
   "Плазма",             // Plasma
   "Шум",                // Noise
   "Жонглирование",      // Juggle
-  "Один цвет"           // Solid Color
+  "Один цвет",          // Solid Color
+  "Снегопад"            // Snowfall
 };
 
 // Авто-переключение режимов
