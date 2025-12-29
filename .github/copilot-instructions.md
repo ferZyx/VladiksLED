@@ -97,3 +97,6 @@ Configured in `platformio.ini` with static IP `192.168.1.222`. Update `config.h`
 - **Watchdog resets**: Avoid EEPROM writes in interrupt context or rapid succession
 - **Heap fragmentation**: Use `snprintf` over String concatenation in loops
 - **Time sync fails**: Falls back to HTTP API, then browser-set time via `/api/time/set`
+
+## IMPORTANT:
+- Use `./rules/create-mode.rule.md` as a reference for adding/deleting new LED modes.
