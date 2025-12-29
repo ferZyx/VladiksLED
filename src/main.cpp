@@ -25,7 +25,8 @@ const char* MODE_NAMES[] = {
   "Жонглирование",      // Juggle
   "Один цвет",          // Solid Color
   "Снегопад",           // Snowfall
-  "Северное сияние"     // Aurora
+  "Северное сияние",    // Aurora
+  "Светлячки"           // Fireflies
 };
 
 // Авто-переключение режимов

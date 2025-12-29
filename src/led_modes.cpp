@@ -31,6 +31,7 @@ void runMode(uint8_t mode) {
     case 9: mode_solid_color(); break;
     case 10: mode_snowfall(); break;
     case 11: mode_aurora(); break;
+    case 12: mode_fireflies(); break;
     
     default: mode_rainbow_beat(); break;
   }
@@ -375,6 +376,193 @@ void mode_aurora() {
       uint8_t fade = sin8(j * 128 / curtainWidth);  // Плавное затухание к краям
       uint8_t addBright = (curtainBright * fade) / 256;
       leds[curtainPos + j] = leds[curtainPos + j].lerp8(CHSV(baseHue + 32, 180, 255), addBright);
+    }
+  }
+}
+
+// Fireflies - Светлячки
+// Имитация волшебных светлячков: точки плавно загораются и угасают в случайных местах
+// Новогодняя палитра: красные, зелёные, золотые и белые искорки
+void mode_fireflies() {
+  uint8_t speed = ledState.modeSettings[ledState.currentMode].speed;
+  uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
+  
+  // Максимальное количество одновременных светлячков (5-30)
+  uint8_t maxFireflies = map(scale, 0, 255, 5, 30);
+  
+  // Структура для хранения состояния каждого светлячка
+  // phase: 0=неактивен, 1-127=разгорается, 128-255=угасает
+  static struct {
+    uint16_t pos;      // Позиция на ленте
+    uint8_t phase;     // Фаза жизненного цикла (0=мёртв)
+    uint8_t hue;       // Индивидуальный оттенок
+    uint8_t sat;       // Насыщенность (для белых искорок)
+    uint8_t maxBright; // Максимальная яркость этого светлячка
+    uint8_t speed;     // Индивидуальная скорость (разные светлячки мигают с разной скоростью)
+  } fireflies[30];
+  
+  static unsigned long lastUpdate = 0;
+  static bool initialized = false;
+  
+  // Новогодние цвета (hue): красный=0, зелёный=96, золотой=32
+  // Массив новогодних оттенков
+  static const uint8_t xmasHues[] = {0, 0, 96, 96, 32, 32, 160};  // красный, красный, зелёный, зелёный, золотой, золотой, голубой
+  static const uint8_t numXmasHues = 7;
+  
+  // Инициализация при первом запуске
+  if (!initialized) {
+    for (int i = 0; i < 30; i++) {
+      fireflies[i].phase = 0;
+      fireflies[i].pos = 0;
+    }
+    initialized = true;
+  }
+  
+  // Скорость обновления анимации (5-30ms)
+  uint8_t updateInterval = map(speed, 0, 255, 30, 5);
+  
+  unsigned long now = millis();
+  if (now - lastUpdate < updateInterval) {
+    // Просто перерисовываем без обновления состояния
+    fill_solid(leds, ledState.numLeds, CRGB::Black);
+    for (int i = 0; i < maxFireflies; i++) {
+      if (fireflies[i].phase > 0 && fireflies[i].pos < ledState.numLeds) {
+        uint8_t brightness;
+        if (fireflies[i].phase <= 127) {
+          // Разгорается: 0->127 соответствует 0->255 яркости (но макс = maxBright)
+          brightness = ease8InOutCubic(fireflies[i].phase * 2);
+          brightness = (brightness * fireflies[i].maxBright) / 255;
+        } else {
+          // Угасает: 128->255 соответствует 255->0 яркости
+          brightness = ease8InOutCubic((255 - fireflies[i].phase) * 2);
+          brightness = (brightness * fireflies[i].maxBright) / 255;
+        }
+        leds[fireflies[i].pos] = CHSV(fireflies[i].hue, fireflies[i].sat, brightness);
+        
+        // Добавляем легкое свечение на соседние пиксели (ореол)
+        if (brightness > 50) {
+          uint8_t glowBright = brightness / 3;  // Усилили ореол
+          uint8_t glowSat = fireflies[i].sat > 50 ? fireflies[i].sat - 30 : 0;
+          if (fireflies[i].pos > 0) {
+            leds[fireflies[i].pos - 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
+          }
+          if (fireflies[i].pos < ledState.numLeds - 1) {
+            leds[fireflies[i].pos + 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
+          }
+        }
+      }
+    }
+    return;
+  }
+  lastUpdate = now;
+  
+  // Очищаем ленту
+  fill_solid(leds, ledState.numLeds, CRGB::Black);
+  
+  // Обновляем состояние каждого светлячка
+  for (int i = 0; i < maxFireflies; i++) {
+    if (fireflies[i].phase > 0) {
+      // Светлячок активен - продвигаем фазу
+      uint8_t phaseStep = 1 + fireflies[i].speed / 64;  // Индивидуальная скорость
+      
+      if (fireflies[i].phase <= 127) {
+        // Фаза разгорания
+        fireflies[i].phase += phaseStep;
+        if (fireflies[i].phase > 127) fireflies[i].phase = 128;  // Переход к угасанию
+      } else if (fireflies[i].phase < 255) {
+        // Фаза угасания
+        fireflies[i].phase += phaseStep;
+        if (fireflies[i].phase < 128) fireflies[i].phase = 255;  // Overflow protection
+      }
+      
+      // Светлячок полностью угас
+      if (fireflies[i].phase >= 254) {
+        fireflies[i].phase = 0;
+      }
+      
+      // Рисуем светлячка
+      if (fireflies[i].phase > 0 && fireflies[i].pos < ledState.numLeds) {
+        uint8_t brightness;
+        if (fireflies[i].phase <= 127) {
+          // Разгорается с кубической интерполяцией для плавности
+          brightness = ease8InOutCubic(fireflies[i].phase * 2);
+          brightness = (brightness * fireflies[i].maxBright) / 255;
+        } else {
+          // Угасает
+          brightness = ease8InOutCubic((255 - fireflies[i].phase) * 2);
+          brightness = (brightness * fireflies[i].maxBright) / 255;
+        }
+        
+        // Основная точка светлячка
+        leds[fireflies[i].pos] = CHSV(fireflies[i].hue, fireflies[i].sat, brightness);
+        
+        // Ореол свечения на соседних пикселях для магического эффекта
+        if (brightness > 50) {
+          uint8_t glowBright = brightness / 3;  // Усилили ореол
+          uint8_t glowSat = fireflies[i].sat > 50 ? fireflies[i].sat - 30 : 0;
+          if (fireflies[i].pos > 0) {
+            leds[fireflies[i].pos - 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
+          }
+          if (fireflies[i].pos < ledState.numLeds - 1) {
+            leds[fireflies[i].pos + 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
+          }
+        }
+      }
+    } else {
+      // Светлячок неактивен - может появиться новый
+      // Вероятность появления зависит от speed (чаще при высокой скорости)
+      uint8_t spawnChance = map(speed, 0, 255, 5, 40);
+      
+      if (random8() < spawnChance) {
+        // Создаём нового светлячка
+        fireflies[i].pos = random16(ledState.numLeds);
+        fireflies[i].phase = 1;  // Начинаем разгораться
+        
+        // Новогодняя палитра!
+        uint8_t colorChoice = random8(100);
+        if (colorChoice < 15) {
+          // 15% - белые/серебристые искорки (очень красиво!)
+          fireflies[i].hue = random8();  // Любой оттенок, но...
+          fireflies[i].sat = random8(0, 30);  // Почти белый!
+        } else {
+          // 85% - новогодние цвета
+          uint8_t hueIdx = random8(numXmasHues);
+          fireflies[i].hue = xmasHues[hueIdx] + random8(16) - 8;  // Небольшая вариация ±8
+          fireflies[i].sat = 255;  // Максимальная насыщенность!
+        }
+        
+        // Случайная максимальная яркость (разные светлячки - разная интенсивность)
+        fireflies[i].maxBright = random8(180, 255);  // Повысили минимум
+        
+        // Случайная скорость мигания
+        fireflies[i].speed = random8(64, 255);
+      }
+    }
+  }
+  
+  // Добавляем редкие "вспышки" - когда светлячок особенно ярко мигает
+  // Это создаёт эффект "общения" между светлячками
+  static unsigned long lastFlash = 0;
+  if (now - lastFlash > 400) {  // Чуть чаще вспышки
+    if (random8() < 20) {  // ~8% шанс
+      // Находим активного светлячка и делаем его ярче
+      for (int i = 0; i < maxFireflies; i++) {
+        if (fireflies[i].phase > 50 && fireflies[i].phase < 200) {
+          // Вспышка! Добавляем яркость
+          uint16_t pos = fireflies[i].pos;
+          if (pos < ledState.numLeds) {
+            // Яркая белая вспышка с цветным ядром
+            leds[pos] = CHSV(fireflies[i].hue, fireflies[i].sat, 255);
+            // Расширенный белый ореол при вспышке
+            if (pos > 0) leds[pos - 1] = CHSV(fireflies[i].hue, fireflies[i].sat / 2, 180);
+            if (pos > 1) leds[pos - 2] += CHSV(fireflies[i].hue, fireflies[i].sat / 3, 90);
+            if (pos < ledState.numLeds - 1) leds[pos + 1] = CHSV(fireflies[i].hue, fireflies[i].sat / 2, 180);
+            if (pos < ledState.numLeds - 2) leds[pos + 2] += CHSV(fireflies[i].hue, fireflies[i].sat / 3, 90);
+          }
+          lastFlash = now;
+          break;
+        }
+      }
     }
   }
 }
