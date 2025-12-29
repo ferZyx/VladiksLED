@@ -24,7 +24,8 @@ const char* MODE_NAMES[] = {
   "Шум",                // Noise
   "Жонглирование",      // Juggle
   "Один цвет",          // Solid Color
-  "Снегопад"            // Snowfall
+  "Снегопад",           // Snowfall
+  "Северное сияние"     // Aurora
 };
 
 // Авто-переключение режимов

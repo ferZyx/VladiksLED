@@ -320,7 +320,8 @@ const modeNames = [
     "Шум",                // Noise
     "Жонглирование",      // Juggle
     "Один цвет",          // Solid Color
-    "Снегопад"            // Snowfall
+    "Снегопад",           // Snowfall
+    "Северное сияние"     // Aurora
 ];
 
         let currentModeId = 0;  // Currently active mode on device

@@ -24,5 +24,6 @@ void mode_noise();
 void mode_juggle();
 void mode_solid_color();
 void mode_snowfall();
+void mode_aurora();
 
 #endif

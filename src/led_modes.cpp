@@ -30,6 +30,7 @@ void runMode(uint8_t mode) {
     case 8: mode_juggle(); break;
     case 9: mode_solid_color(); break;
     case 10: mode_snowfall(); break;
+    case 11: mode_aurora(); break;
     
     default: mode_rainbow_beat(); break;
   }
@@ -276,6 +277,104 @@ void mode_snowfall() {
       leds[i] = CHSV(hue, sat, twinkle);
     } else {
       leds[i] = CRGB::Black;
+    }
+  }
+}
+
+// Aurora Borealis - Северное сияние
+// Имитация полярного сияния с плавными переливами зелёного, голубого и фиолетового
+void mode_aurora() {
+  uint8_t speed = ledState.modeSettings[ledState.currentMode].speed;
+  uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
+  
+  // Статические переменные для плавной анимации
+  static uint16_t auroraTime = 0;
+  static uint8_t baseHue = 96;  // Начинаем с зелёного (характерный цвет сияния)
+  
+  // Speed контролирует скорость движения волн (1-10)
+  uint8_t waveSpeed = map(speed, 0, 255, 1, 10);
+  auroraTime += waveSpeed;
+  
+  // Медленное изменение базового оттенка для разнообразия
+  if (random8() < 3) {
+    baseHue = baseHue + random8(3) - 1;  // Случайный дрейф ±1
+    // Ограничиваем палитру сияния: зелёный (96) - голубой (128) - фиолетовый (192)
+    if (baseHue < 80) baseHue = 80;
+    if (baseHue > 200) baseHue = 200;
+  }
+  
+  // Scale контролирует "ширину" волн сияния (10-50)
+  uint8_t waveWidth = map(scale, 0, 255, 10, 50);
+  
+  for (int i = 0; i < ledState.numLeds; i++) {
+    // Создаём несколько накладывающихся волн с разными частотами
+    // Это имитирует слоистую структуру полярного сияния
+    
+    // Основная волна - медленная и широкая
+    uint8_t wave1 = sin8((i * waveWidth / 3) + auroraTime);
+    
+    // Вторая волна - быстрее и уже
+    uint8_t wave2 = sin8((i * waveWidth / 2) - (auroraTime * 2) + 64);
+    
+    // Третья волна - ещё быстрее, для мерцания
+    uint8_t wave3 = sin8((i * waveWidth) + (auroraTime * 3) + 128);
+    
+    // Комбинируем волны с разными весами
+    uint16_t combinedWave = ((uint16_t)wave1 * 3 + (uint16_t)wave2 * 2 + (uint16_t)wave3) / 6;
+    
+    // Добавляем Perlin noise для органичного мерцания
+    uint8_t noise = inoise8(i * 30, auroraTime * 2);
+    
+    // Яркость зависит от комбинированной волны и шума
+    uint8_t brightness = (combinedWave * noise) / 256;
+    
+    // Применяем нелинейное преобразование для более драматичного эффекта
+    // Это создаёт "пики" яркости как в настоящем сиянии
+    if (brightness > 128) {
+      brightness = 128 + (brightness - 128) * 2;  // Усиливаем яркие области
+    } else {
+      brightness = brightness / 2;  // Приглушаем тёмные области
+    }
+    brightness = constrain(brightness, 0, 255);
+    
+    // Цвет варьируется вдоль ленты с добавлением шума
+    // Создаём характерные цвета сияния: зелёный -> голубой -> фиолетовый
+    uint8_t hueNoise = inoise8(i * 20, auroraTime / 2);
+    uint8_t hue = baseHue + (hueNoise / 4) - 32;  // Вариация ±32 от базового
+    
+    // Насыщенность высокая, но с небольшой вариацией
+    uint8_t saturation = 200 + (noise / 8);  // 200-231
+    
+    // Добавляем случайные "вспышки" - характерная черта сияния
+    if (random8() < 5 && brightness > 100) {
+      brightness = qadd8(brightness, 50);  // Случайная вспышка
+      saturation = qsub8(saturation, 40);  // Вспышки чуть белее
+    }
+    
+    leds[i] = CHSV(hue, saturation, brightness);
+  }
+  
+  // Добавляем редкие "занавески" - вертикальные полосы повышенной яркости
+  static uint8_t curtainPos = 0;
+  static uint8_t curtainWidth = 5;
+  static unsigned long lastCurtain = 0;
+  
+  if (millis() - lastCurtain > 2000) {  // Новая занавеска каждые 2 секунды
+    if (random8() < 30) {  // 12% шанс появления
+      curtainPos = random8(ledState.numLeds);
+      curtainWidth = random8(3, 10);
+      lastCurtain = millis();
+    }
+  }
+  
+  // Рисуем "занавеску" с затуханием
+  uint8_t curtainAge = (millis() - lastCurtain) / 10;
+  if (curtainAge < 100) {
+    uint8_t curtainBright = 255 - curtainAge * 2;
+    for (int j = 0; j < curtainWidth && (curtainPos + j) < ledState.numLeds; j++) {
+      uint8_t fade = sin8(j * 128 / curtainWidth);  // Плавное затухание к краям
+      uint8_t addBright = (curtainBright * fade) / 256;
+      leds[curtainPos + j] = leds[curtainPos + j].lerp8(CHSV(baseHue + 32, 180, 255), addBright);
     }
   }
 }
