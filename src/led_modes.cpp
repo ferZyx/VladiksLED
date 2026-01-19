@@ -566,3 +566,108 @@ void mode_fireflies() {
     }
   }
 }
+
+// =====================================================
+// ===== РЕЖИМЫ ПОДСВЕТКИ (BACKLIGHT MODES) =====
+// =====================================================
+
+// Получить активный цвет подсветки
+CRGB getBacklightColor() {
+  uint8_t idx = ledState.backlight.activeColorIndex;
+  if (idx < MAX_BACKLIGHT_COLORS && ledState.backlight.colors[idx].enabled) {
+    return ledState.backlight.colors[idx].color;
+  }
+  // Fallback на первый доступный цвет
+  for (int i = 0; i < MAX_BACKLIGHT_COLORS; i++) {
+    if (ledState.backlight.colors[i].enabled) {
+      return ledState.backlight.colors[i].color;
+    }
+  }
+  return CRGB(255, 180, 107);  // Теплый белый по умолчанию
+}
+
+// Запуск режима подсветки
+void runBacklightMode(uint8_t mode) {
+  if (!ledState.power) {
+    FastLED.clear();
+    FastLED.show();
+    return;
+  }
+  
+  switch (mode) {
+    case 0: backlight_waves(); break;
+    case 1: backlight_pulse(); break;
+    default: backlight_waves(); break;
+  }
+}
+
+// Волны - плавное перемещение яркости по ленте
+// Создает эффект "бегущих волн" одного цвета с вариацией яркости
+void backlight_waves() {
+  uint8_t speed = ledState.backlight.modeSettings[ledState.backlight.currentMode].speed;
+  uint8_t intensity = ledState.backlight.modeSettings[ledState.backlight.currentMode].intensity;
+  
+  CRGB baseColor = getBacklightColor();
+  
+  // Скорость волны: от 5 до 60 BPM (очень медленно до умеренно)
+  uint8_t waveBPM = map(speed, 0, 255, 5, 60);
+  
+  // Интенсивность влияет на глубину волны (насколько темнеет)
+  // При низкой интенсивности - яркость 180-255, при высокой - 50-255
+  uint8_t minBright = map(intensity, 0, 255, 180, 50);
+  uint8_t waveCount = map(intensity, 0, 255, 1, 4);
+  
+  for (int i = 0; i < ledState.numLeds; i++) {
+    // Генерируем волну яркости
+    uint8_t wave1 = beatsin8(waveBPM, minBright, 255, 0, i * waveCount * 3);
+    uint8_t wave2 = beatsin8(waveBPM * 0.7, 0, 40, 0, i * waveCount * 5 + 64);
+    
+    // Комбинируем - wave1 основная, wave2 добавляет вариацию
+    uint8_t brightness = qadd8(wave1, wave2 / 4);
+    if (brightness > 255) brightness = 255;
+    
+    // Применяем яркость к оригинальному цвету через масштабирование RGB
+    // Это сохраняет насыщенность цвета!
+    leds[i].r = scale8(baseColor.r, brightness);
+    leds[i].g = scale8(baseColor.g, brightness);
+    leds[i].b = scale8(baseColor.b, brightness);
+  }
+}
+
+// Пульсация - эффект "дыхания" всей ленты одним цветом
+// Вся лента плавно становится ярче и тусклее
+void backlight_pulse() {
+  uint8_t speed = ledState.backlight.modeSettings[ledState.backlight.currentMode].speed;
+  uint8_t intensity = ledState.backlight.modeSettings[ledState.backlight.currentMode].intensity;
+  
+  CRGB baseColor = getBacklightColor();
+  
+  // Скорость пульсации: от 3 до 30 BPM (очень медленное "дыхание")
+  uint8_t pulseBPM = map(speed, 0, 255, 3, 30);
+  
+  // Интенсивность определяет глубину пульсации
+  // При низкой интенсивности - мягкое дыхание (яркость 180-255)
+  // При высокой - глубокое (яркость 30-255)
+  uint8_t minBright = map(intensity, 0, 255, 180, 30);
+  
+  // Главная пульсация
+  uint8_t mainPulse = beatsin8(pulseBPM, minBright, 255);
+  
+  // Добавляем вторичную пульсацию для более органичного эффекта
+  uint8_t secondPulse = beatsin8(pulseBPM * 1.3, 0, 20);
+  
+  uint8_t brightness = qadd8(mainPulse, secondPulse / 4);
+  if (brightness > 255) brightness = 255;
+  
+  for (int i = 0; i < ledState.numLeds; i++) {
+    // Небольшое смещение яркости по позиции для "живости"
+    uint8_t posOffset = sin8(i * 3 + millis() / 100) / 64;  // 0-4
+    uint8_t pixelBright = qadd8(brightness, posOffset);
+    if (pixelBright > 255) pixelBright = 255;
+    
+    // Применяем яркость к оригинальному RGB цвету - сохраняет насыщенность!
+    leds[i].r = scale8(baseColor.r, pixelBright);
+    leds[i].g = scale8(baseColor.g, pixelBright);
+    leds[i].b = scale8(baseColor.b, pixelBright);
+  }
+}

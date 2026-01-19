@@ -9,10 +9,13 @@ extern CRGB leds[MAX_LEDS];
 // Инициализация LED
 void initLEDs();
 
-// Запуск режима
+// Запуск режима гирлянды
 void runMode(uint8_t mode);
 
-// Базовые режимы (упрощенные версии из референса)
+// Запуск режима подсветки
+void runBacklightMode(uint8_t mode);
+
+// ===== Режимы гирлянды =====
 void mode_blendwave();
 void mode_rainbow_beat();
 void mode_two_sin();
@@ -26,5 +29,9 @@ void mode_solid_color();
 void mode_snowfall();
 void mode_aurora();
 void mode_fireflies();
+
+// ===== Режимы подсветки =====
+void backlight_waves();     // Волны - плавное перемещение света
+void backlight_pulse();     // Пульсация - дыхание цвета
 
 #endif

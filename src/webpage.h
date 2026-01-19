@@ -9,7 +9,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎄 WiFi LED Garland</title>
+    <title>🎄 WiFi LED Controller</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body {
@@ -47,6 +47,28 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             background: rgba(16, 185, 129, 0.15);
             transform: scale(1.02);
         }
+        .color-swatch {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 2px solid transparent;
+        }
+        .color-swatch:hover {
+            transform: scale(1.1);
+        }
+        .color-swatch.active {
+            border: 3px solid #10b981;
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.8);
+        }
+        .op-mode-btn {
+            transition: all 0.3s ease;
+        }
+        .op-mode-btn.active {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
+        }
     </style>
 </head>
 <body class="p-2">
@@ -56,7 +78,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             <!-- Title and Power Toggle on same line -->
             <div class="flex items-center justify-between mb-3">
                 <h1 class="text-2xl md:text-3xl font-bold text-white">
-                    🎄 WiFi LED Garland
+                    🎄 WiFi LED Controller
                 </h1>
                 <div class="flex items-center gap-2">
                     <span class="text-white text-sm md:text-base font-semibold">⚡</span>
@@ -65,6 +87,21 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
                         <div class="toggle-bg block bg-gray-600 w-14 h-8 rounded-full cursor-pointer" onclick="togglePower()"></div>
                         <div class="toggle-label absolute left-1 top-1 bg-white w-6 h-6 rounded-full cursor-pointer" onclick="togglePower()"></div>
                     </div>
+                </div>
+            </div>
+
+            <!-- Operation Mode Toggle -->
+            <div class="mb-3 p-2 bg-white bg-opacity-10 rounded-xl">
+                <div class="text-white text-sm font-semibold mb-2 text-center">Режим работы</div>
+                <div class="flex gap-2">
+                    <button id="opModeGarland" onclick="setOperationMode(0)" 
+                            class="op-mode-btn flex-1 py-2 px-3 rounded-lg font-semibold text-white bg-white bg-opacity-20">
+                        🎄 Гирлянда
+                    </button>
+                    <button id="opModeBacklight" onclick="setOperationMode(1)" 
+                            class="op-mode-btn flex-1 py-2 px-3 rounded-lg font-semibold text-white bg-white bg-opacity-20">
+                        💡 Подсветка
+                    </button>
                 </div>
             </div>
 
@@ -102,10 +139,10 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             </div>
         </div>
 
-        <!-- Modes Grid -->
-        <div class="glass rounded-2xl shadow-2xl p-3">
+        <!-- Garland Modes Grid (показывается когда operationMode = 0) -->
+        <div id="garlandPanel" class="glass rounded-2xl shadow-2xl p-3 mb-3">
             <div class="flex items-center justify-between mb-3">
-                <h2 class="text-xl font-bold text-white">🎨 Режимы свечения</h2>
+                <h2 class="text-xl font-bold text-white">🎨 Режимы гирлянды</h2>
             </div>
             <div class="mb-3 p-2 bg-white bg-opacity-10 rounded-xl">
                 <span class="text-white text-sm font-semibold">Активный режим: </span>
@@ -127,6 +164,54 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
             
             <div id="modesGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
                 <!-- Modes will be loaded here -->
+            </div>
+        </div>
+
+        <!-- Backlight Panel (показывается когда operationMode = 1) -->
+        <div id="backlightPanel" class="glass rounded-2xl shadow-2xl p-3 mb-3 hidden">
+            <div class="flex items-center justify-between mb-3">
+                <h2 class="text-xl font-bold text-white">💡 Настройки подсветки</h2>
+            </div>
+            
+            <!-- Color Palette -->
+            <div class="mb-4 p-3 bg-white bg-opacity-10 rounded-xl">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-white text-sm font-semibold">🎨 Цвета</span>
+                    <button onclick="openColorPicker()" 
+                            class="bg-green-500 hover:bg-green-600 text-white text-xs py-1 px-3 rounded-lg">
+                        ➕ Добавить
+                    </button>
+                </div>
+                <div id="colorPalette" class="flex flex-wrap gap-2">
+                    <!-- Colors will be loaded here -->
+                </div>
+            </div>
+            
+            <!-- Backlight Modes -->
+            <div class="mb-3 p-3 bg-white bg-opacity-10 rounded-xl">
+                <div class="text-white text-sm font-semibold mb-2">🌊 Режимы анимации</div>
+                <div id="backlightModesGrid" class="grid grid-cols-2 gap-2">
+                    <!-- Backlight modes will be loaded here -->
+                </div>
+                
+                <!-- Auto-switch Settings -->
+                <div class="mt-3 pt-3 border-t border-white border-opacity-20">
+                    <div class="text-white text-xs font-semibold mb-2">⏱️ Авто-переключение</div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="text-white text-xs block mb-1">Режимы (сек)</label>
+                            <input type="number" id="blModeDelay" min="0" max="3600" value="0"
+                                   class="w-full bg-white bg-opacity-20 text-white px-2 py-1 rounded text-xs"
+                                   onchange="updateBacklightAutoSwitch()">
+                        </div>
+                        <div>
+                            <label class="text-white text-xs block mb-1">Цвета (сек)</label>
+                            <input type="number" id="blColorDelay" min="0" max="3600" value="0"
+                                   class="w-full bg-white bg-opacity-20 text-white px-2 py-1 rounded text-xs"
+                                   onchange="updateBacklightAutoSwitch()">
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -159,10 +244,10 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
-    <!-- Settings Modal -->
+    <!-- Settings Modal (Garland) -->
     <div id="settingsModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
         <div class="glass rounded-2xl p-6 m-4 max-w-md w-full">
-            <h2 class="text-2xl font-bold text-white mb-4">⚙️ Настройки</h2>
+            <h2 class="text-2xl font-bold text-white mb-4">⚙️ Настройки гирлянды</h2>
             
             <div class="mb-4">
                 <label class="text-white block mb-2">Авто-переключение (сек, 0 = выкл)</label>
@@ -190,7 +275,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
         </div>
     </div>
 
-    <!-- Mode Settings Modal -->
+    <!-- Mode Settings Modal (Garland) -->
     <div id="modeSettingsModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
         <div class="glass rounded-2xl p-4 m-4 max-w-md w-full">
             <h2 class="text-xl font-bold text-white mb-3" id="modeSettingsTitle">Настройки режима</h2>
@@ -231,6 +316,65 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
                 <button onclick="closeModeSettings()" 
                         class="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
                     Закрыть
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Backlight Mode Settings Modal -->
+    <div id="blModeSettingsModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="glass rounded-2xl p-4 m-4 max-w-md w-full">
+            <h2 class="text-xl font-bold text-white mb-3" id="blModeSettingsTitle">Настройки режима</h2>
+            
+            <div class="mb-3">
+                <label class="text-white block mb-1 text-sm">Скорость</label>
+                <input type="range" id="blModeSpeed" min="0" max="255" value="128"
+                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
+                       oninput="updateBacklightModeSettings()">
+            </div>
+
+            <div class="mb-3">
+                <label class="text-white block mb-1 text-sm">Интенсивность</label>
+                <input type="range" id="blModeIntensity" min="0" max="255" value="128"
+                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
+                       oninput="updateBacklightModeSettings()">
+            </div>
+
+            <div class="mb-3">
+                <label class="text-white block mb-1 text-sm">Яркость</label>
+                <input type="range" id="blModeBrightness" min="0" max="255" value="255"
+                       class="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer"
+                       oninput="updateBacklightModeSettings()">
+            </div>
+
+            <div class="flex gap-2">
+                <button onclick="closeBacklightModeSettings()" 
+                        class="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-lg text-sm">
+                    Закрыть
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Color Picker Modal (Add/Edit) -->
+    <div id="colorPickerModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="glass rounded-2xl p-4 m-4 max-w-md w-full">
+            <h2 class="text-xl font-bold text-white mb-3" id="colorPickerTitle">🎨 Добавить цвет</h2>
+            
+            <div class="mb-4">
+                <input type="color" id="newColorPicker" value="#ff9966" 
+                       class="w-full h-16 rounded-lg cursor-pointer"
+                       oninput="previewColorChange()">
+            </div>
+            
+            <div class="flex gap-2">
+                <button onclick="saveColor()" id="colorSaveBtn"
+                        class="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg">
+                    ➕ Добавить
+                </button>
+                <button onclick="closeColorPicker()" 
+                        class="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg">
+                    Отмена
                 </button>
             </div>
         </div>
@@ -308,7 +452,7 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     </div>
 
     <script>
-        // Названия режимов
+        // Названия режимов гирлянды
 const modeNames = [
     "Смешанные волны",    // Blendwave
     "Радужная пульсация", // Rainbow Beat
@@ -325,16 +469,38 @@ const modeNames = [
     "Светлячки"           // Fireflies
 ];
 
-        let currentModeId = 0;  // Currently active mode on device
+// Названия режимов подсветки
+const backlightModeNames = [
+    "Волны",              // Waves
+    "Пульсация"           // Pulse
+];
+
+        let operationMode = 0;  // 0 = garland, 1 = backlight
+        let currentModeId = 0;  // Currently active mode on device (garland)
         let editingModeId = null;  // Mode currently being edited (null if settings modal closed)
         let brightnessDebounceTimer = null;
         let ledCountDebounceTimer = null;
         let modeSettingsDebounceTimer = null;
-        let modeSettingsCache = [];  // Cache for mode settings
+        let modeSettingsCache = [];  // Cache for garland mode settings
         let currentTab = 'active';  // Current tab (active or archived)
         let selectedDays = 0x7F;  // Битовая маска выбранных дней (по умолчанию все дни)
         let schedulesCache = [];  // Cache for schedules
         let currentTimeInterval = null;  // Interval for updating current time
+        
+        // Backlight state
+        let backlightState = {
+            currentMode: 0,
+            activeColorIndex: 0,
+            modeSettings: [],
+            colors: [],
+            autoSwitch: {
+                modeDelay: 0,
+                modeRandom: false,
+                colorDelay: 0,
+                colorRandom: false
+            }
+        };
+        let editingBacklightModeId = null;
 
         // Debug logging helper
         function debugLog(msg) {
@@ -396,6 +562,32 @@ const modeNames = [
                 debugLog('updateBrightness: sending API call with value=' + value);
                 await apiCall('/api/brightness', { value: parseInt(value) });
             }, 300);
+        }
+        
+        // ===== OPERATION MODE =====
+        async function setOperationMode(mode) {
+            operationMode = mode;
+            updateOperationModeUI();
+            await apiCall('/api/operation-mode', { mode: mode });
+        }
+        
+        function updateOperationModeUI() {
+            const garlandBtn = document.getElementById('opModeGarland');
+            const backlightBtn = document.getElementById('opModeBacklight');
+            const garlandPanel = document.getElementById('garlandPanel');
+            const backlightPanel = document.getElementById('backlightPanel');
+            
+            if (operationMode === 0) {
+                garlandBtn.classList.add('active');
+                backlightBtn.classList.remove('active');
+                garlandPanel.classList.remove('hidden');
+                backlightPanel.classList.add('hidden');
+            } else {
+                garlandBtn.classList.remove('active');
+                backlightBtn.classList.add('active');
+                garlandPanel.classList.add('hidden');
+                backlightPanel.classList.remove('hidden');
+            }
         }
 
         // Update LED count with debounce
@@ -581,12 +773,55 @@ const modeNames = [
                     debugLog('loadState: modeSettingsCache updated, ' + modeSettingsCache.length + ' modes');
                 }
                 
+                // Update operation mode
+                if (state.operationMode !== undefined) {
+                    operationMode = state.operationMode;
+                    updateOperationModeUI();
+                }
+                
                 updateBrightnessUI(state.brightness);  // UI only, no API call!
                 renderModes();
                 updateModeCards();
             } else {
                 debugLog('loadState: failed to fetch state');
             }
+            
+            // Also load backlight state
+            await loadBacklightState();
+        }
+        
+        // Load backlight state
+        async function loadBacklightState() {
+            const state = await apiCall('/api/backlight/state');
+            if (state) {
+                backlightState.currentMode = state.currentMode;
+                backlightState.activeColorIndex = state.activeColorIndex;
+                backlightState.modeSettings = state.modeSettings || [];
+                backlightState.autoSwitch = {
+                    modeDelay: state.modeAutoSwitchDelay || 0,
+                    modeRandom: state.modeRandomOrder || false,
+                    colorDelay: state.colorAutoSwitchDelay || 0,
+                    colorRandom: state.colorRandomOrder || false
+                };
+            }
+            
+            // Load colors
+            const colors = await apiCall('/api/backlight/colors');
+            if (colors && colors.colors) {
+                backlightState.colors = colors.colors;
+                backlightState.activeColorIndex = colors.activeIndex;
+                renderColorPalette();
+            }
+            
+            // Update auto-switch input fields
+            const modeDelayInput = document.getElementById('blModeDelay');
+            const colorDelayInput = document.getElementById('blColorDelay');
+            console.log('loadBacklightState: modeDelay=' + backlightState.autoSwitch.modeDelay + ', colorDelay=' + backlightState.autoSwitch.colorDelay);
+            console.log('loadBacklightState: modeDelayInput=' + modeDelayInput + ', colorDelayInput=' + colorDelayInput);
+            if (modeDelayInput) modeDelayInput.value = backlightState.autoSwitch.modeDelay;
+            if (colorDelayInput) colorDelayInput.value = backlightState.autoSwitch.colorDelay;
+            
+            renderBacklightModes();
         }
 
         // Switch between active and archived tabs
@@ -690,6 +925,274 @@ const modeNames = [
             
             // Update the current mode display after rendering cards
             updateModeCards();
+        }
+        
+        // ===== BACKLIGHT FUNCTIONS =====
+        
+        // Color editing state
+        let editingColorIndex = null;  // null = adding new, number = editing existing
+        let colorPreviewTimer = null;
+        
+        // Render color palette
+        function renderColorPalette() {
+            const palette = document.getElementById('colorPalette');
+            palette.innerHTML = '';
+            
+            backlightState.colors.forEach((colorObj, index) => {
+                if (!colorObj.enabled) return;
+                
+                // Container for swatch + buttons
+                const container = document.createElement('div');
+                container.className = 'relative group';
+                
+                const swatch = document.createElement('div');
+                swatch.className = 'color-swatch';
+                swatch.style.backgroundColor = colorObj.hex;
+                if (index === backlightState.activeColorIndex) {
+                    swatch.classList.add('active');
+                }
+                
+                // Click to select color
+                swatch.onclick = () => selectBacklightColor(index);
+                
+                // Double-click to edit color
+                swatch.ondblclick = (e) => {
+                    e.stopPropagation();
+                    openColorEditor(index, colorObj.hex);
+                };
+                
+                // Delete button
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full text-xs leading-none flex items-center justify-center opacity-70 hover:opacity-100';
+                deleteBtn.innerHTML = '×';
+                deleteBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    deleteBacklightColor(index);
+                };
+                
+                // Edit button
+                const editBtn = document.createElement('button');
+                editBtn.className = 'absolute -top-1 -left-1 w-4 h-4 bg-blue-500 text-white rounded-full text-xs leading-none flex items-center justify-center opacity-70 hover:opacity-100';
+                editBtn.innerHTML = '✎';
+                editBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    openColorEditor(index, colorObj.hex);
+                };
+                
+                container.appendChild(swatch);
+                container.appendChild(deleteBtn);
+                container.appendChild(editBtn);
+                palette.appendChild(container);
+            });
+        }
+        
+        // Select backlight color
+        async function selectBacklightColor(index) {
+            backlightState.activeColorIndex = index;
+            renderColorPalette();
+            await apiCall('/api/backlight/active-color', { index: index });
+        }
+        
+        // Delete backlight color
+        async function deleteBacklightColor(index) {
+            if (!confirm('Удалить этот цвет?')) return;
+            
+            const result = await fetch(`/api/backlight/colors?index=${index}`, { method: 'DELETE' });
+            if (result.ok) {
+                await loadBacklightState();
+            }
+        }
+        
+        // Open color picker modal (for adding new color)
+        function openColorPicker() {
+            editingColorIndex = null;
+            document.getElementById('colorPickerTitle').textContent = '🎨 Добавить цвет';
+            document.getElementById('colorSaveBtn').textContent = '➕ Добавить';
+            document.getElementById('newColorPicker').value = '#ff9966';
+            document.getElementById('colorPickerModal').classList.remove('hidden');
+            document.getElementById('colorPickerModal').classList.add('flex');
+        }
+        
+        // Open color editor (for editing existing color)
+        function openColorEditor(index, currentHex) {
+            editingColorIndex = index;
+            document.getElementById('colorPickerTitle').textContent = '🎨 Редактировать цвет';
+            document.getElementById('colorSaveBtn').textContent = '💾 Сохранить';
+            document.getElementById('newColorPicker').value = currentHex;
+            document.getElementById('colorPickerModal').classList.remove('hidden');
+            document.getElementById('colorPickerModal').classList.add('flex');
+            
+            // Select this color as active so changes are visible immediately
+            if (backlightState.activeColorIndex !== index) {
+                selectBacklightColor(index);
+            }
+        }
+        
+        function closeColorPicker() {
+            editingColorIndex = null;
+            clearTimeout(colorPreviewTimer);
+            document.getElementById('colorPickerModal').classList.add('hidden');
+            document.getElementById('colorPickerModal').classList.remove('flex');
+        }
+        
+        // Preview color change with debounce (auto-apply while editing)
+        function previewColorChange() {
+            if (editingColorIndex === null) return;  // Only for editing mode
+            
+            clearTimeout(colorPreviewTimer);
+            colorPreviewTimer = setTimeout(async () => {
+                const hex = document.getElementById('newColorPicker').value;
+                const rgb = hexToRgb(hex);
+                if (rgb) {
+                    await apiCall('/api/backlight/colors', { 
+                        index: editingColorIndex, 
+                        r: rgb.r, 
+                        g: rgb.g, 
+                        b: rgb.b 
+                    });
+                    // Update local state
+                    if (backlightState.colors[editingColorIndex]) {
+                        backlightState.colors[editingColorIndex].hex = hex;
+                    }
+                    renderColorPalette();
+                }
+            }, 500);  // 500ms debounce
+        }
+        
+        // Save color (add new or save edited)
+        async function saveColor() {
+            const hex = document.getElementById('newColorPicker').value;
+            const rgb = hexToRgb(hex);
+            if (!rgb) return;
+            
+            if (editingColorIndex !== null) {
+                // Editing existing - just close (changes already applied via preview)
+                closeColorPicker();
+                await loadBacklightState();  // Refresh to make sure we have latest
+            } else {
+                // Adding new color
+                const result = await apiCall('/api/backlight/colors', { r: rgb.r, g: rgb.g, b: rgb.b });
+                if (result && result.success) {
+                    closeColorPicker();
+                    await loadBacklightState();
+                } else if (result && result.error) {
+                    alert(result.error);
+                }
+            }
+        }
+        
+        // Update backlight auto-switch settings
+        async function updateBacklightAutoSwitch() {
+            const modeDelayEl = document.getElementById('blModeDelay');
+            const colorDelayEl = document.getElementById('blColorDelay');
+            
+            if (!modeDelayEl || !colorDelayEl) {
+                console.error('Auto-switch inputs not found!');
+                return;
+            }
+            
+            const modeDelay = parseInt(modeDelayEl.value) || 0;
+            const colorDelay = parseInt(colorDelayEl.value) || 0;
+            
+            console.log('Saving auto-switch: modeDelay=' + modeDelay + ', colorDelay=' + colorDelay);
+            
+            const result = await apiCall('/api/backlight/auto-switch', { 
+                modeDelay: modeDelay, 
+                modeRandom: false,
+                colorDelay: colorDelay, 
+                colorRandom: false 
+            });
+            
+            console.log('Auto-switch API result:', result);
+            
+            // Update local state
+            backlightState.autoSwitch.modeDelay = modeDelay;
+            backlightState.autoSwitch.colorDelay = colorDelay;
+        }
+        
+        // Render backlight modes
+        function renderBacklightModes() {
+            const grid = document.getElementById('backlightModesGrid');
+            grid.innerHTML = '';
+            
+            backlightModeNames.forEach((name, index) => {
+                const card = document.createElement('div');
+                card.className = 'mode-card glass rounded-xl p-2 cursor-pointer';
+                if (index === backlightState.currentMode) {
+                    card.classList.add('active');
+                }
+                
+                card.innerHTML = `
+                    <div class="text-white font-bold mb-2 text-sm">${name}</div>
+                    <div class="flex gap-1">
+                        <button onclick="selectBacklightMode(${index})" 
+                                class="flex-1 bg-green-500 hover:bg-green-600 text-white text-xs py-1 px-1 rounded">
+                            Выбрать
+                        </button>
+                        <button onclick="openBacklightModeSettings(${index}); event.stopPropagation();" 
+                                class="bg-blue-500 hover:bg-blue-600 text-white text-xs py-1 px-2 rounded">
+                            ⚙️
+                        </button>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+        
+        // Select backlight mode
+        async function selectBacklightMode(modeId) {
+            backlightState.currentMode = modeId;
+            renderBacklightModes();
+            await apiCall('/api/backlight/mode', { mode: modeId });
+        }
+        
+        // Open backlight mode settings
+        function openBacklightModeSettings(modeId) {
+            editingBacklightModeId = modeId;
+            document.getElementById('blModeSettingsTitle').textContent = `${backlightModeNames[modeId]} - Настройки`;
+            
+            if (backlightState.modeSettings[modeId]) {
+                const settings = backlightState.modeSettings[modeId];
+                document.getElementById('blModeSpeed').value = settings.speed;
+                document.getElementById('blModeIntensity').value = settings.intensity;
+                document.getElementById('blModeBrightness').value = settings.brightness;
+            }
+            
+            document.getElementById('blModeSettingsModal').classList.remove('hidden');
+            document.getElementById('blModeSettingsModal').classList.add('flex');
+        }
+        
+        function closeBacklightModeSettings() {
+            editingBacklightModeId = null;
+            document.getElementById('blModeSettingsModal').classList.add('hidden');
+            document.getElementById('blModeSettingsModal').classList.remove('flex');
+        }
+        
+        // Update backlight mode settings
+        let blModeSettingsTimer = null;
+        function updateBacklightModeSettings() {
+            clearTimeout(blModeSettingsTimer);
+            blModeSettingsTimer = setTimeout(async () => {
+                if (editingBacklightModeId === null) return;
+                
+                const speed = document.getElementById('blModeSpeed').value;
+                const intensity = document.getElementById('blModeIntensity').value;
+                const brightness = document.getElementById('blModeBrightness').value;
+                
+                await apiCall('/api/backlight/mode/settings', {
+                    modeId: editingBacklightModeId,
+                    speed: parseInt(speed),
+                    intensity: parseInt(intensity),
+                    brightness: parseInt(brightness)
+                });
+                
+                // Update cache
+                if (backlightState.modeSettings[editingBacklightModeId]) {
+                    backlightState.modeSettings[editingBacklightModeId].speed = parseInt(speed);
+                    backlightState.modeSettings[editingBacklightModeId].intensity = parseInt(intensity);
+                    backlightState.modeSettings[editingBacklightModeId].brightness = parseInt(brightness);
+                }
+            }, 300);
         }
 
         // Schedule functions

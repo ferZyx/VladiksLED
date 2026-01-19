@@ -45,4 +45,15 @@ void handleSetTime(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
 void handleGetDebug(AsyncWebServerRequest *request);
 void handleNotFound();
 
+// Backlight API handlers
+void handleSetOperationMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleGetBacklightState(AsyncWebServerRequest *request);
+void handleGetBacklightColors(AsyncWebServerRequest *request);
+void handleSetBacklightMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleSetBacklightModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleSetBacklightActiveColor(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleSetBacklightColor(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+void handleDeleteBacklightColor(AsyncWebServerRequest *request);
+void handleSetBacklightAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+
 #endif

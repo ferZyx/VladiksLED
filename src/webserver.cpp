@@ -77,6 +77,8 @@ void setupWebServer() {
   server.on("/api/schedules", HTTP_GET, handleGetSchedules);
   server.on("/api/time", HTTP_GET, handleGetTime);
   server.on("/api/debug", HTTP_GET, handleGetDebug);
+  server.on("/api/backlight/state", HTTP_GET, handleGetBacklightState);
+  server.on("/api/backlight/colors", HTTP_GET, handleGetBacklightColors);
   
   // API endpoints - POST requests with body
   // Note: The first lambda is called when request completes (after body), 
@@ -115,8 +117,29 @@ void setupWebServer() {
     [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/time/set complete"); }, 
     NULL, handleSetTime);
   
+  // Backlight API endpoints (more specific routes FIRST)
+  server.on("/api/operation-mode", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/operation-mode complete"); }, 
+    NULL, handleSetOperationMode);
+  server.on("/api/backlight/mode/settings", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/mode/settings complete"); }, 
+    NULL, handleSetBacklightModeSettings);
+  server.on("/api/backlight/mode", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/mode complete"); }, 
+    NULL, handleSetBacklightMode);
+  server.on("/api/backlight/active-color", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/active-color complete"); }, 
+    NULL, handleSetBacklightActiveColor);
+  server.on("/api/backlight/colors", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/colors complete"); }, 
+    NULL, handleSetBacklightColor);
+  server.on("/api/backlight/auto-switch", HTTP_POST, 
+    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/auto-switch complete"); }, 
+    NULL, handleSetBacklightAutoSwitch);
+  
   // DELETE request
   server.on("/api/schedules", HTTP_DELETE, handleDeleteSchedule);
+  server.on("/api/backlight/colors", HTTP_DELETE, handleDeleteBacklightColor);
   
   server.onNotFound([](AsyncWebServerRequest *request){
     LOG_PRINTF(">>> 404 NOT FOUND: %s %s\n", request->methodToString(), request->url().c_str());
@@ -134,29 +157,38 @@ void handleWebServer() {
 }
 
 void handleGetState(AsyncWebServerRequest *request) {
-  DynamicJsonDocument doc(8192);
+  unsigned long startTime = millis();
+  uint32_t freeHeapBefore = ESP.getFreeHeap();
   
-  doc["power"] = ledState.power;
-  doc["brightness"] = ledState.brightness;
-  doc["numLeds"] = ledState.numLeds;
-  doc["currentMode"] = ledState.currentMode;
-  doc["autoSwitchDelay"] = ledState.autoSwitchDelay;
-  doc["randomOrder"] = ledState.randomOrder;
+  // Используем chunked response чтобы не держать весь JSON в памяти
+  AsyncResponseStream *response = request->beginResponseStream("application/json");
   
-  // Добавляем настройки всех режимов
-  JsonArray modes = doc.createNestedArray("modeSettings");
+  response->print("{");
+  response->printf("\"power\":%s,", ledState.power ? "true" : "false");
+  response->printf("\"brightness\":%d,", ledState.brightness);
+  response->printf("\"numLeds\":%d,", ledState.numLeds);
+  response->printf("\"currentMode\":%d,", ledState.currentMode);
+  response->printf("\"autoSwitchDelay\":%lu,", ledState.autoSwitchDelay);
+  response->printf("\"randomOrder\":%s,", ledState.randomOrder ? "true" : "false");
+  response->printf("\"operationMode\":%d,", (uint8_t)ledState.operationMode);
+  
+  // Настройки режимов гирлянды
+  response->print("\"modeSettings\":[");
   for (int i = 0; i < TOTAL_MODES; i++) {
-    JsonObject mode = modes.createNestedObject();
-    mode["speed"] = ledState.modeSettings[i].speed;
-    mode["scale"] = ledState.modeSettings[i].scale;
-    mode["brightness"] = ledState.modeSettings[i].brightness;
-    mode["archived"] = ledState.modeSettings[i].archived;
+    if (i > 0) response->print(",");
+    response->printf("{\"speed\":%d,\"scale\":%d,\"brightness\":%d,\"archived\":%s}",
+      ledState.modeSettings[i].speed,
+      ledState.modeSettings[i].scale,
+      ledState.modeSettings[i].brightness,
+      ledState.modeSettings[i].archived ? "true" : "false");
   }
+  response->print("]}");
   
-  String response;
-  serializeJson(doc, response);
+  request->send(response);
   
-  request->send(200, "application/json", response);
+  unsigned long elapsed = millis() - startTime;
+  uint32_t freeHeapAfter = ESP.getFreeHeap();
+  LOG_PRINTF("API: /api/state - %lums, heap: %u->%u\n", elapsed, freeHeapBefore, freeHeapAfter);
 }
 
 void handleSetPower(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
@@ -621,4 +653,321 @@ void handleGetDebug(AsyncWebServerRequest *request) {
   String response;
   serializeJson(doc, response);
   request->send(200, "application/json", response);
+}
+
+// =====================================================
+// ===== BACKLIGHT API HANDLERS =====
+// =====================================================
+
+void handleSetOperationMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error && doc.containsKey("mode")) {
+    uint8_t mode = doc["mode"];
+    if (mode <= 1) {
+      ledState.operationMode = (OperationMode)mode;
+      LOG_PRINTF("API: Operation mode set to %s\n", mode == 0 ? "GARLAND" : "BACKLIGHT");
+      settingsChanged = true;
+      request->send(200, "application/json", "{\"success\":true}");
+      return;
+    }
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleGetBacklightState(AsyncWebServerRequest *request) {
+  unsigned long startTime = millis();
+  
+  AsyncResponseStream *response = request->beginResponseStream("application/json");
+  
+  response->print("{");
+  response->printf("\"currentMode\":%d,", ledState.backlight.currentMode);
+  response->printf("\"modeAutoSwitchDelay\":%lu,", ledState.backlight.modeAutoSwitchDelay);
+  response->printf("\"modeRandomOrder\":%s,", ledState.backlight.modeRandomOrder ? "true" : "false");
+  response->printf("\"activeColorIndex\":%d,", ledState.backlight.activeColorIndex);
+  response->printf("\"colorAutoSwitchDelay\":%lu,", ledState.backlight.colorAutoSwitchDelay);
+  response->printf("\"colorRandomOrder\":%s,", ledState.backlight.colorRandomOrder ? "true" : "false");
+  
+  // Настройки режимов подсветки
+  response->print("\"modeSettings\":[");
+  for (int i = 0; i < TOTAL_BACKLIGHT_MODES; i++) {
+    if (i > 0) response->print(",");
+    response->printf("{\"speed\":%d,\"intensity\":%d,\"brightness\":%d,\"archived\":%s}",
+      ledState.backlight.modeSettings[i].speed,
+      ledState.backlight.modeSettings[i].intensity,
+      ledState.backlight.modeSettings[i].brightness,
+      ledState.backlight.modeSettings[i].archived ? "true" : "false");
+  }
+  response->print("]}");
+  
+  request->send(response);
+  
+  LOG_PRINTF("API: /api/backlight/state - %lums\n", millis() - startTime);
+}
+
+void handleGetBacklightColors(AsyncWebServerRequest *request) {
+  unsigned long startTime = millis();
+  
+  AsyncResponseStream *response = request->beginResponseStream("application/json");
+  
+  response->print("{\"colors\":[");
+  for (int i = 0; i < MAX_BACKLIGHT_COLORS; i++) {
+    if (i > 0) response->print(",");
+    response->printf("{\"index\":%d,\"enabled\":%s,\"r\":%d,\"g\":%d,\"b\":%d,\"hex\":\"#%02X%02X%02X\"}",
+      i,
+      ledState.backlight.colors[i].enabled ? "true" : "false",
+      ledState.backlight.colors[i].color.r,
+      ledState.backlight.colors[i].color.g,
+      ledState.backlight.colors[i].color.b,
+      ledState.backlight.colors[i].color.r,
+      ledState.backlight.colors[i].color.g,
+      ledState.backlight.colors[i].color.b);
+  }
+  response->printf("],\"activeIndex\":%d}", ledState.backlight.activeColorIndex);
+  
+  request->send(response);
+  
+  LOG_PRINTF("API: /api/backlight/colors - %lums\n", millis() - startTime);
+}
+
+void handleSetBacklightMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error && doc.containsKey("mode")) {
+    uint8_t mode = doc["mode"];
+    if (mode < TOTAL_BACKLIGHT_MODES) {
+      ledState.backlight.currentMode = mode;
+      LOG_PRINTF("API: Backlight mode set to %d\n", mode);
+      settingsChanged = true;
+      request->send(200, "application/json", "{\"success\":true}");
+      return;
+    }
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleSetBacklightModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  // Wait for complete data
+  if (index + len != total) return;
+  
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  LOG_PRINTF("API: Backlight mode settings received, len=%d\n", len);
+  
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (error) {
+    LOG_PRINTF("API: JSON parse error: %s\n", error.c_str());
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  
+  if (!doc.containsKey("modeId")) {
+    LOG_PRINTLN("API: Missing modeId");
+    request->send(400, "application/json", "{\"error\":\"Missing modeId\"}");
+    return;
+  }
+  
+  int modeId = doc["modeId"];
+  LOG_PRINTF("API: modeId=%d, TOTAL_BACKLIGHT_MODES=%d\n", modeId, TOTAL_BACKLIGHT_MODES);
+  
+  if (modeId < 0 || modeId >= TOTAL_BACKLIGHT_MODES) {
+    request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
+    return;
+  }
+  
+  if (doc.containsKey("speed")) {
+    ledState.backlight.modeSettings[modeId].speed = doc["speed"];
+  }
+  if (doc.containsKey("intensity")) {
+    ledState.backlight.modeSettings[modeId].intensity = doc["intensity"];
+  }
+  if (doc.containsKey("brightness")) {
+    ledState.backlight.modeSettings[modeId].brightness = doc["brightness"];
+  }
+  if (doc.containsKey("archived")) {
+    ledState.backlight.modeSettings[modeId].archived = doc["archived"];
+  }
+  
+  LOG_PRINTF("API: Backlight mode %d settings updated\n", modeId);
+  settingsChanged = true;
+  request->send(200, "application/json", "{\"success\":true}");
+}
+
+void handleSetBacklightActiveColor(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (!error && doc.containsKey("index")) {
+    uint8_t idx = doc["index"];
+    if (idx < MAX_BACKLIGHT_COLORS && ledState.backlight.colors[idx].enabled) {
+      ledState.backlight.activeColorIndex = idx;
+      LOG_PRINTF("API: Backlight active color set to %d\n", idx);
+      settingsChanged = true;
+      request->send(200, "application/json", "{\"success\":true}");
+      return;
+    }
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleSetBacklightColor(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (error) {
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  
+  // Добавление нового цвета (найти первый свободный слот)
+  if (doc.containsKey("r") && doc.containsKey("g") && doc.containsKey("b")) {
+    uint8_t r = doc["r"];
+    uint8_t g = doc["g"];
+    uint8_t b = doc["b"];
+    
+    // Если указан index - обновляем существующий
+    if (doc.containsKey("index")) {
+      int idx = doc["index"];
+      if (idx >= 0 && idx < MAX_BACKLIGHT_COLORS) {
+        ledState.backlight.colors[idx].color = CRGB(r, g, b);
+        ledState.backlight.colors[idx].enabled = true;
+        LOG_PRINTF("API: Backlight color %d updated to #%02X%02X%02X\n", idx, r, g, b);
+        settingsChanged = true;
+        request->send(200, "application/json", "{\"success\":true}");
+        return;
+      }
+    } else {
+      // Найти первый свободный слот
+      for (int i = 0; i < MAX_BACKLIGHT_COLORS; i++) {
+        if (!ledState.backlight.colors[i].enabled) {
+          ledState.backlight.colors[i].color = CRGB(r, g, b);
+          ledState.backlight.colors[i].enabled = true;
+          LOG_PRINTF("API: Backlight color added at %d: #%02X%02X%02X\n", i, r, g, b);
+          settingsChanged = true;
+          
+          StaticJsonDocument<64> resp;
+          resp["success"] = true;
+          resp["index"] = i;
+          String response;
+          serializeJson(resp, response);
+          request->send(200, "application/json", response);
+          return;
+        }
+      }
+      request->send(400, "application/json", "{\"error\":\"No free color slots\"}");
+      return;
+    }
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Invalid request\"}");
+}
+
+void handleDeleteBacklightColor(AsyncWebServerRequest *request) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  if (request->hasParam("index")) {
+    int idx = request->getParam("index")->value().toInt();
+    
+    if (idx >= 0 && idx < MAX_BACKLIGHT_COLORS) {
+      // Не удаляем последний активный цвет
+      int activeCount = 0;
+      for (int i = 0; i < MAX_BACKLIGHT_COLORS; i++) {
+        if (ledState.backlight.colors[i].enabled) activeCount++;
+      }
+      
+      if (activeCount <= 1) {
+        request->send(400, "application/json", "{\"error\":\"Cannot delete last color\"}");
+        return;
+      }
+      
+      ledState.backlight.colors[idx].enabled = false;
+      
+      // Если удалили активный цвет - переключаемся на первый доступный
+      if (ledState.backlight.activeColorIndex == idx) {
+        for (int i = 0; i < MAX_BACKLIGHT_COLORS; i++) {
+          if (ledState.backlight.colors[i].enabled) {
+            ledState.backlight.activeColorIndex = i;
+            break;
+          }
+        }
+      }
+      
+      LOG_PRINTF("API: Backlight color %d deleted\n", idx);
+      settingsChanged = true;
+      request->send(200, "application/json", "{\"success\":true}");
+      return;
+    }
+  }
+  
+  request->send(400, "application/json", "{\"error\":\"Missing index parameter\"}");
+}
+
+void handleSetBacklightAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (!checkThrottle()) {
+    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
+    return;
+  }
+  
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, (const char*)data, len);
+  
+  if (error) {
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  
+  // Настройки авто-переключения режимов
+  if (doc.containsKey("modeDelay")) {
+    ledState.backlight.modeAutoSwitchDelay = doc["modeDelay"];
+  }
+  if (doc.containsKey("modeRandom")) {
+    ledState.backlight.modeRandomOrder = doc["modeRandom"];
+  }
+  
+  // Настройки авто-переключения цветов
+  if (doc.containsKey("colorDelay")) {
+    ledState.backlight.colorAutoSwitchDelay = doc["colorDelay"];
+  }
+  if (doc.containsKey("colorRandom")) {
+    ledState.backlight.colorRandomOrder = doc["colorRandom"];
+  }
+  
+  LOG_PRINTF("API: Backlight auto-switch updated: modeDelay=%d, colorDelay=%d\n", 
+             ledState.backlight.modeAutoSwitchDelay, 
+             ledState.backlight.colorAutoSwitchDelay);
+  settingsChanged = true;
+  request->send(200, "application/json", "{\"success\":true}");
 }

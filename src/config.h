@@ -20,8 +20,12 @@
 #define DEFAULT_LEDS 50     // Количество LED по умолчанию
 #define DEFAULT_BRIGHTNESS 128  // Яркость по умолчанию (0-255)
 
-// Режимы работы
-#define TOTAL_MODES 13      // Общее количество режимов
+// Режимы работы гирлянды
+#define TOTAL_MODES 13      // Общее количество режимов гирлянды
+
+// Режимы подсветки
+#define TOTAL_BACKLIGHT_MODES 2   // Количество режимов подсветки (Волны, Пульсация)
+#define MAX_BACKLIGHT_COLORS 12   // Максимальное количество цветов подсветки
 
 // Web Server
 #define WEB_SERVER_PORT 80
@@ -33,6 +37,7 @@
 #define NTP_SERVER "time.google.com"  // Более надежный NTP сервер
 #define NTP_OFFSET 18000          // UTC+5 (Казахстан/Екатеринбург) в секундах
 #define NTP_UPDATE_INTERVAL 3600000  // Обновление каждый час (мс)
+#define WAIT_FOR_TIME_SYNC false  // true = ждать синхронизации времени (зелёный индикатор), false = сразу запускать эффекты
 
 // Расписание
 #define MAX_SCHEDULES 10          // Максимальное количество расписаний

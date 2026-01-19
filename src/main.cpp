@@ -12,7 +12,7 @@
 #include "logger.h"
 #include "diagnostics.h"
 
-// Названия режимов (должны совпадать с frontend)
+// Названия режимов гирлянды (должны совпадать с frontend)
 const char* MODE_NAMES[] = {
   "Смешанные волны",    // Blendwave
   "Радужная пульсация", // Rainbow Beat
@@ -29,8 +29,18 @@ const char* MODE_NAMES[] = {
   "Светлячки"           // Fireflies
 };
 
-// Авто-переключение режимов
+// Названия режимов подсветки
+const char* BACKLIGHT_MODE_NAMES[] = {
+  "Волны",              // Waves
+  "Пульсация"           // Pulse
+};
+
+// Авто-переключение режимов гирлянды
 unsigned long lastModeSwitch = 0;
+
+// Авто-переключение для подсветки
+unsigned long lastBacklightModeSwitch = 0;
+unsigned long lastBacklightColorSwitch = 0;
 
 // Отслеживание последней проверки расписания
 int lastCheckedMinute = -1;
@@ -239,6 +249,8 @@ void setup() {
   LOG_PRINTLN("/ in your browser\n");
   
   lastModeSwitch = millis();
+  lastBacklightModeSwitch = millis();
+  lastBacklightColorSwitch = millis();
 }
 
 // Проверка и выполнение расписаний
@@ -337,9 +349,14 @@ void loop() {
   EVERY_N_MILLISECONDS(20) {
     diag.taskStart("LEDs");
     
-    // Check if time is synchronized (year > 2001)
-    if (time(nullptr) > 1000000000) {
-      runMode(ledState.currentMode);
+    // Check if time is synchronized (year > 2001) or if we don't need to wait
+    if (!WAIT_FOR_TIME_SYNC || time(nullptr) > 1000000000) {
+      // Выбираем режим в зависимости от operationMode
+      if (ledState.operationMode == MODE_GARLAND) {
+        runMode(ledState.currentMode);
+      } else {
+        runBacklightMode(ledState.backlight.currentMode);
+      }
     } else {
       // Time not synced yet - show solid green to indicate waiting state
       // This matches the "success connection" color, keeping it until we get time
@@ -351,8 +368,8 @@ void loop() {
     diag.taskEnd();
   }
   
-  // Авто-переключение режимов
-  if (ledState.autoSwitchDelay > 0) {
+  // Авто-переключение режимов гирлянды (только если в режиме гирлянды)
+  if (ledState.operationMode == MODE_GARLAND && ledState.autoSwitchDelay > 0) {
     unsigned long now = millis();
     if (now - lastModeSwitch >= (ledState.autoSwitchDelay * 1000UL)) {
       lastModeSwitch = now;
@@ -417,7 +434,93 @@ void loop() {
     }
   }
   
-
+  // ===== Авто-переключение для режима подсветки =====
+  if (ledState.operationMode == MODE_BACKLIGHT) {
+    unsigned long now = millis();
+    
+    // Авто-переключение режимов подсветки
+    if (ledState.backlight.modeAutoSwitchDelay > 0) {
+      if (now - lastBacklightModeSwitch >= (ledState.backlight.modeAutoSwitchDelay * 1000UL)) {
+        lastBacklightModeSwitch = now;
+        
+        // Собираем список активных режимов подсветки
+        uint8_t activeModes[TOTAL_BACKLIGHT_MODES];
+        uint8_t activeCount = 0;
+        
+        for (uint8_t i = 0; i < TOTAL_BACKLIGHT_MODES; i++) {
+          if (!ledState.backlight.modeSettings[i].archived) {
+            activeModes[activeCount++] = i;
+          }
+        }
+        
+        if (activeCount > 0) {
+          if (ledState.backlight.modeRandomOrder) {
+            uint8_t randomIndex = random8(activeCount);
+            ledState.backlight.currentMode = activeModes[randomIndex];
+          } else {
+            int currentIndex = -1;
+            for (uint8_t i = 0; i < activeCount; i++) {
+              if (activeModes[i] == ledState.backlight.currentMode) {
+                currentIndex = i;
+                break;
+              }
+            }
+            currentIndex = (currentIndex >= 0) ? (currentIndex + 1) % activeCount : 0;
+            ledState.backlight.currentMode = activeModes[currentIndex];
+          }
+          
+          if (ledState.backlight.currentMode >= TOTAL_BACKLIGHT_MODES) {
+            ledState.backlight.currentMode = 0;
+          }
+          
+          char logMsg[80];
+          snprintf(logMsg, sizeof(logMsg), "Backlight mode auto-switched to: %s (%d)", 
+                   BACKLIGHT_MODE_NAMES[ledState.backlight.currentMode], 
+                   ledState.backlight.currentMode);
+          LOG_PRINTLN(logMsg);
+        }
+      }
+    }
+    
+    // Авто-переключение цветов подсветки
+    if (ledState.backlight.colorAutoSwitchDelay > 0) {
+      if (now - lastBacklightColorSwitch >= (ledState.backlight.colorAutoSwitchDelay * 1000UL)) {
+        lastBacklightColorSwitch = now;
+        
+        // Собираем список активных цветов
+        uint8_t activeColors[MAX_BACKLIGHT_COLORS];
+        uint8_t activeCount = 0;
+        
+        for (uint8_t i = 0; i < MAX_BACKLIGHT_COLORS; i++) {
+          if (ledState.backlight.colors[i].enabled) {
+            activeColors[activeCount++] = i;
+          }
+        }
+        
+        if (activeCount > 0) {
+          if (ledState.backlight.colorRandomOrder) {
+            uint8_t randomIndex = random8(activeCount);
+            ledState.backlight.activeColorIndex = activeColors[randomIndex];
+          } else {
+            int currentIndex = -1;
+            for (uint8_t i = 0; i < activeCount; i++) {
+              if (activeColors[i] == ledState.backlight.activeColorIndex) {
+                currentIndex = i;
+                break;
+              }
+            }
+            currentIndex = (currentIndex >= 0) ? (currentIndex + 1) % activeCount : 0;
+            ledState.backlight.activeColorIndex = activeColors[currentIndex];
+          }
+          
+          CRGB c = ledState.backlight.colors[ledState.backlight.activeColorIndex].color;
+          char logMsg[80];
+          snprintf(logMsg, sizeof(logMsg), "Backlight color auto-switched to #%02X%02X%02X", c.r, c.g, c.b);
+          LOG_PRINTLN(logMsg);
+        }
+      }
+    }
+  }
   
   // Сохранение настроек в главном цикле (безопасно для EEPROM)
   if (settingsChanged) {
