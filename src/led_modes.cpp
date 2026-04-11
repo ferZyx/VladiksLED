@@ -1,5 +1,6 @@
 #include "led_modes.h"
 #include "led_state.h"
+#include <math.h>
 
 CRGB leds[MAX_LEDS];
 
@@ -571,19 +572,150 @@ void mode_fireflies() {
 // ===== РЕЖИМЫ ПОДСВЕТКИ (BACKLIGHT MODES) =====
 // =====================================================
 
-// Получить активный цвет подсветки
-CRGB getBacklightColor() {
+namespace {
+  const uint32_t BACKLIGHT_TRANSITION_MIN_MS = 1200;
+  const uint32_t BACKLIGHT_TRANSITION_MAX_MS = 11000;
+  const uint16_t BACKLIGHT_MAX_RGB_DISTANCE = 442;
+
+  bool backlightTransitionInitialized = false;
+  bool backlightTransitionActive = false;
+  uint8_t trackedBacklightColorIndex = 255;
+
+  CRGB backlightCurrentColor = CRGB::Black;
+  CRGB backlightTransitionStartColor = CRGB::Black;
+  CRGB backlightTransitionTargetColor = CRGB::Black;
+  CRGB trackedBacklightSlotColor = CRGB::Black;
+
+  uint32_t backlightTransitionStartMs = 0;
+  uint32_t backlightTransitionDurationMs = 0;
+}
+
+static bool areColorsEqual(const CRGB& a, const CRGB& b) {
+  return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
+static CRGB resolveBacklightTargetColor() {
   uint8_t idx = ledState.backlight.activeColorIndex;
   if (idx < MAX_BACKLIGHT_COLORS && ledState.backlight.colors[idx].enabled) {
     return ledState.backlight.colors[idx].color;
   }
-  // Fallback на первый доступный цвет
+
   for (int i = 0; i < MAX_BACKLIGHT_COLORS; i++) {
     if (ledState.backlight.colors[i].enabled) {
       return ledState.backlight.colors[i].color;
     }
   }
-  return CRGB(255, 180, 107);  // Теплый белый по умолчанию
+
+  return CRGB(255, 180, 107);
+}
+
+static uint16_t rgbDistance(const CRGB& a, const CRGB& b) {
+  int16_t dr = static_cast<int16_t>(b.r) - static_cast<int16_t>(a.r);
+  int16_t dg = static_cast<int16_t>(b.g) - static_cast<int16_t>(a.g);
+  int16_t db = static_cast<int16_t>(b.b) - static_cast<int16_t>(a.b);
+
+  uint32_t sum = static_cast<uint32_t>(dr * dr) + static_cast<uint32_t>(dg * dg) + static_cast<uint32_t>(db * db);
+  return static_cast<uint16_t>(sqrtf(static_cast<float>(sum)));
+}
+
+static uint32_t calculateBacklightTransitionDurationMs(const CRGB& from, const CRGB& to) {
+  uint16_t distance = rgbDistance(from, to);
+  if (distance <= 1) {
+    return 0;
+  }
+
+  uint32_t transitionRange = BACKLIGHT_TRANSITION_MAX_MS - BACKLIGHT_TRANSITION_MIN_MS;
+  return BACKLIGHT_TRANSITION_MIN_MS + (static_cast<uint32_t>(distance) * transitionRange) / BACKLIGHT_MAX_RGB_DISTANCE;
+}
+
+static CRGB interpolateColor(const CRGB& from, const CRGB& to, float t) {
+  float eased = t * t * (3.0f - 2.0f * t);  // smoothstep
+  if (eased < 0.0f) eased = 0.0f;
+  if (eased > 1.0f) eased = 1.0f;
+
+  CRGB result;
+  result.r = static_cast<uint8_t>(from.r + (static_cast<float>(to.r) - from.r) * eased + 0.5f);
+  result.g = static_cast<uint8_t>(from.g + (static_cast<float>(to.g) - from.g) * eased + 0.5f);
+  result.b = static_cast<uint8_t>(from.b + (static_cast<float>(to.b) - from.b) * eased + 0.5f);
+  return result;
+}
+
+static void updateBacklightTransitionProgress(uint32_t nowMs) {
+  if (!backlightTransitionActive) {
+    return;
+  }
+
+  if (backlightTransitionDurationMs == 0) {
+    backlightCurrentColor = backlightTransitionTargetColor;
+    backlightTransitionActive = false;
+    return;
+  }
+
+  uint32_t elapsed = nowMs - backlightTransitionStartMs;
+  if (elapsed >= backlightTransitionDurationMs) {
+    backlightCurrentColor = backlightTransitionTargetColor;
+    backlightTransitionActive = false;
+    return;
+  }
+
+  float t = static_cast<float>(elapsed) / static_cast<float>(backlightTransitionDurationMs);
+  backlightCurrentColor = interpolateColor(backlightTransitionStartColor, backlightTransitionTargetColor, t);
+}
+
+// Получить активный цвет подсветки (с плавным переходом по RGB)
+CRGB getBacklightColor() {
+  uint32_t nowMs = millis();
+  CRGB desiredColor = resolveBacklightTargetColor();
+  uint8_t currentIndex = ledState.backlight.activeColorIndex;
+
+  bool activeSlotValid = currentIndex < MAX_BACKLIGHT_COLORS && ledState.backlight.colors[currentIndex].enabled;
+  CRGB activeSlotColor = activeSlotValid ? ledState.backlight.colors[currentIndex].color : desiredColor;
+
+  if (!backlightTransitionInitialized) {
+    backlightTransitionInitialized = true;
+    trackedBacklightColorIndex = currentIndex;
+    trackedBacklightSlotColor = activeSlotColor;
+
+    backlightCurrentColor = desiredColor;
+    backlightTransitionStartColor = desiredColor;
+    backlightTransitionTargetColor = desiredColor;
+    backlightTransitionActive = false;
+    backlightTransitionDurationMs = 0;
+    return backlightCurrentColor;
+  }
+
+  updateBacklightTransitionProgress(nowMs);
+
+  bool colorIndexChanged = (currentIndex != trackedBacklightColorIndex);
+  if (colorIndexChanged) {
+    trackedBacklightColorIndex = currentIndex;
+    trackedBacklightSlotColor = activeSlotColor;
+
+    backlightTransitionStartColor = backlightCurrentColor;
+    backlightTransitionTargetColor = desiredColor;
+    backlightTransitionStartMs = nowMs;
+    backlightTransitionDurationMs = calculateBacklightTransitionDurationMs(backlightTransitionStartColor, backlightTransitionTargetColor);
+
+    if (backlightTransitionDurationMs == 0) {
+      backlightCurrentColor = backlightTransitionTargetColor;
+      backlightTransitionActive = false;
+    } else {
+      backlightTransitionActive = true;
+    }
+
+    return backlightCurrentColor;
+  }
+
+  if (activeSlotValid && !areColorsEqual(activeSlotColor, trackedBacklightSlotColor)) {
+    trackedBacklightSlotColor = activeSlotColor;
+    backlightCurrentColor = activeSlotColor;
+    backlightTransitionStartColor = activeSlotColor;
+    backlightTransitionTargetColor = activeSlotColor;
+    backlightTransitionActive = false;
+    backlightTransitionDurationMs = 0;
+  }
+
+  return backlightCurrentColor;
 }
 
 // Запуск режима подсветки

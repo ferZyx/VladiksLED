@@ -1,0 +1,1 @@
+After code changes: run pio run -e d1_mini as primary verification. If build cache issues appear, run clean rebuild command. Verify no credential/network-only edits in src/config.h are accidentally included. Ensure settings persistence pattern is respected (settingsChanged flag, no direct saveLEDState in handlers).
