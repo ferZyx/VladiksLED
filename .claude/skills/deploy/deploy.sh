@@ -86,12 +86,13 @@ upload() {
 verify() {
   echo "🔎 Ожидание устройства после перезагрузки..."
   local resp="" up=""
-  for _ in $(seq 1 40); do
-    resp="$(curl -s -m 2 "http://$DEVICE_IP/api/debug" || true)"
+  # Частый опрос (до ~60 с): устройство поднимается за ~10 с после приёма образа
+  for _ in $(seq 1 60); do
+    resp="$(curl -s -m 1 "http://$DEVICE_IP/api/debug" || true)"
     up="$(echo "$resp" | sed -nE 's/.*"uptimeMs":([0-9]+).*/\1/p')"
     if [[ -n "$up" && ( -z "$UPTIME_BEFORE" || "$up" -lt "$UPTIME_BEFORE" ) ]]; then break; fi
     up=""
-    sleep 1.5
+    sleep 0.5
   done
   if [[ -z "$up" ]]; then
     echo "❌ Устройство не поднялось с новой прошивкой за ~60 с" >&2

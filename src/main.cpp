@@ -56,6 +56,74 @@ unsigned long lastSettingsChangeAt = 0;
 bool powerOffFrameShown = false;
 
 /**
+ * Кэш параметров точки доступа в RTC-памяти для быстрого подключения к WiFi.
+ * RTC user memory переживает программный рестарт и перезагрузку после OTA,
+ * но стирается при отключении питания — тогда просто будет обычное подключение.
+ */
+struct WifiRtcCache {
+  uint32_t magic;     // признак валидной записи
+  uint8_t channel;    // канал WiFi точки доступа
+  uint8_t bssid[6];   // MAC точки доступа
+  uint8_t reserved;   // выравнивание до 4 байт
+  uint32_t checksum;  // контроль целостности (мусор после холодного старта)
+};
+
+// Смещение в блоках по 4 байта. Первые ~128 байт RTC user memory использует eboot
+// для команды OTA-копирования, поэтому берём область заведомо дальше.
+static const uint32_t WIFI_RTC_OFFSET = 96;
+static const uint32_t WIFI_RTC_MAGIC = 0x57494649;  // "WIFI"
+
+/**
+ * Простая контрольная сумма записи кэша (FNV-1a по всем полям, кроме checksum).
+ * @param c запись кэша
+ * @returns 32-битная сумма
+ */
+static uint32_t wifiCacheChecksum(const WifiRtcCache& c) {
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(&c);
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < offsetof(WifiRtcCache, checksum); i++) {
+    h = (h ^ p[i]) * 16777619u;
+  }
+  return h;
+}
+
+/**
+ * Читает кэш точки доступа из RTC-памяти.
+ * @param out куда положить данные
+ * @returns true, если запись валидна
+ */
+static bool loadWifiCache(WifiRtcCache& out) {
+  if (!ESP.rtcUserMemoryRead(WIFI_RTC_OFFSET, reinterpret_cast<uint32_t*>(&out), sizeof(out))) {
+    return false;
+  }
+  return out.magic == WIFI_RTC_MAGIC && out.checksum == wifiCacheChecksum(out) &&
+         out.channel >= 1 && out.channel <= 14;
+}
+
+/**
+ * Сохраняет канал и BSSID текущей точки доступа в RTC-память.
+ * @param channel канал WiFi
+ * @param bssid MAC точки доступа (6 байт)
+ */
+static void saveWifiCache(uint8_t channel, const uint8_t* bssid) {
+  if (bssid == nullptr) return;
+  WifiRtcCache c = {};
+  c.magic = WIFI_RTC_MAGIC;
+  c.channel = channel;
+  memcpy(c.bssid, bssid, sizeof(c.bssid));
+  c.checksum = wifiCacheChecksum(c);
+  ESP.rtcUserMemoryWrite(WIFI_RTC_OFFSET, reinterpret_cast<uint32_t*>(&c), sizeof(c));
+}
+
+/**
+ * Инвалидирует кэш (например, если быстрое подключение не удалось).
+ */
+static void clearWifiCache() {
+  WifiRtcCache c = {};
+  ESP.rtcUserMemoryWrite(WIFI_RTC_OFFSET, reinterpret_cast<uint32_t*>(&c), sizeof(c));
+}
+
+/**
  * Переводит календарную дату (UTC) в число дней от 1970-01-01.
  * Алгоритм Говарда Хиннанта (days_from_civil): не зависит от TZ и не требует timegm(),
  * которого нет в newlib для ESP8266.
@@ -140,6 +208,9 @@ void setup() {
   LOG_PRINTLN(F("\n\n🎄 WiFi LED Garland Starting..."));
   LOG_PRINTLN(F("BOOT: System Restarted"));
   LOG_PRINTF("Reset Reason: %s\n", ESP.getResetReason().c_str());
+  // millis() считается от сброса чипа: после OTA сюда входит копирование образа
+  // загрузчиком eboot, поэтому значение здесь показывает «стоимость» перезагрузки
+  LOG_PRINTF("setup() started at %lu ms\n", millis());
   
   // Инициализация LED state
   initLEDState();
@@ -153,7 +224,15 @@ void setup() {
   LOG_PRINTLN(WIFI_SSID);
   
   WiFi.mode(WIFI_STA);
-  
+
+  // Диагностика загрузки: логируем события WiFi с отметкой millis()
+  static WiFiEventHandler onConnectedHandler = WiFi.onStationModeConnected(
+    [](const WiFiEventStationModeConnected&) { LOG_PRINTF("📶 WiFi associated at %lu ms\n", millis()); });
+  static WiFiEventHandler onGotIpHandler = WiFi.onStationModeGotIP(
+    [](const WiFiEventStationModeGotIP&) { LOG_PRINTF("📶 WiFi got IP at %lu ms\n", millis()); });
+  static WiFiEventHandler onDisconnectedHandler = WiFi.onStationModeDisconnected(
+    [](const WiFiEventStationModeDisconnected& e) { LOG_PRINTF("📶 WiFi disconnected at %lu ms, reason %d\n", millis(), e.reason); });
+
 #ifdef USE_STATIC_IP
   // Настройка статического IP
   IPAddress local_IP(STATIC_IP);
@@ -170,20 +249,44 @@ void setup() {
   }
 #endif
   
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  
-  // Анимация подключения на LED
+  // Быстрое подключение: если в RTC-памяти есть канал/BSSID с прошлой загрузки,
+  // подключаемся к ним напрямую без сканирования эфира (полное сканирование
+  // занимало ~12 с из ~14 с загрузки и тормозило каждый OTA-деплой).
+  WifiRtcCache wifiCache;
+  bool fastConnect = loadWifiCache(wifiCache);
+  if (fastConnect) {
+    LOG_PRINTF("⚡ WiFi fast connect: channel %u\n", wifiCache.channel);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD, wifiCache.channel, wifiCache.bssid, true);
+  } else {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+
+  // Ожидание подключения с анимацией на LED. Опрашиваем статус каждые 100 мс
+  // (раньше 500 мс — до полусекунды лишнего ожидания), огонёк сдвигается раз в 500 мс.
+  const unsigned long wifiStart = millis();
+  const unsigned long FAST_CONNECT_TIMEOUT_MS = 5000;
   int dotCount = 0;
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+    delay(100);
+
+    // Канал/BSSID устарели (роутер сменил канал, другая точка) — обычное подключение со сканированием
+    if (fastConnect && millis() - wifiStart > FAST_CONNECT_TIMEOUT_MS) {
+      LOG_PRINTLN(F("\n⚠️ Fast connect failed, falling back to full scan"));
+      fastConnect = false;
+      clearWifiCache();
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
+
+    if ((millis() - wifiStart) / 500 <= (unsigned long)dotCount) continue;
     LOG_PRINT(F("."));
-    
+
     // Бегущий огонёк во время подключения
     FastLED.clear();
     leds[dotCount % ledState.numLeds] = CRGB::Blue;
     FastLED.show();
     dotCount++;
-    
+
     // Таймаут 30 секунд
     if (dotCount > 60) {
       LOG_PRINTLN(F("\n❌ WiFi connection failed!"));
@@ -198,14 +301,17 @@ void setup() {
     }
   }
   
-  LOG_PRINTLN(F("\n✅ WiFi connected!"));
+  LOG_PRINTF("\n✅ WiFi connected in %lu ms\n", millis() - wifiStart);
   LOG_PRINT(F("IP address: "));
   LOG_PRINTLN(WiFi.localIP().toString());
-  
-  // Зелёная вспышка - успех
+
+  // Запоминаем канал и BSSID для быстрого подключения при следующей перезагрузке
+  saveWifiCache((uint8_t)WiFi.channel(), WiFi.BSSID());
+
+  // Короткая зелёная вспышка — WiFi подключён (150 мс: заметно глазу, но не тормозит загрузку)
   fill_solid(leds, ledState.numLeds, CRGB::Green);
   FastLED.show();
-  delay(1000);
+  delay(150);
   FastLED.clear();
   FastLED.show();
   
@@ -217,42 +323,11 @@ void setup() {
   LOG_PRINTLN(String(NTP_OFFSET / 3600));
   
   // Настраиваем NTP (смещение в секундах, летнее время = 0, до трёх серверов).
-  // SNTP в ядре ESP8266 сам повторяет запросы в фоне, поэтому даже если первые
-  // 5 секунд ожидания ниже не хватило, время подтянется позже без участия loop().
+  // Не ждём синхронизации в setup(): SNTP в ядре ESP8266 работает в фоне и сам
+  // повторяет запросы, а loop() отслеживает момент синхронизации и при необходимости
+  // включает HTTP-фолбэк (см. «Контроль синхронизации времени» в loop()).
+  // Это сокращает загрузку (и время OTA-деплоя) на несколько секунд.
   configTime(NTP_OFFSET, 0, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
-  
-  // Ждем синхронизации времени
-  LOG_PRINT(F("Waiting for NTP sync"));
-  int ntpRetries = 0;
-  time_t now = time(nullptr);
-  
-  while (now < 1000000000 && ntpRetries < 10) {  // Уменьшили попытки NTP
-    delay(500);
-    LOG_PRINT(F("."));
-    now = time(nullptr);
-    ntpRetries++;
-  }
-  
-  if (now >= 1000000000) {
-    LOG_PRINTLN(F("\n✅ NTP time synchronized"));
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    LOG_PRINT(F("Current time: "));
-    LOG_PRINTLN(String(asctime(&timeinfo)));
-  } else {
-    LOG_PRINTLN(F("\n⚠️ NTP sync failed, trying HTTP API..."));
-    
-    // Пробуем синхронизацию через HTTP
-    if (syncTimeViaHTTP()) {
-      now = time(nullptr);
-      struct tm timeinfo;
-      localtime_r(&now, &timeinfo);
-      LOG_PRINT(F("Current time: "));
-      LOG_PRINTLN(String(asctime(&timeinfo)));
-    } else {
-      LOG_PRINTLN(F("⚠️ HTTP sync also failed, time will be set from browser"));
-    }
-  }
   
   // Настройка OTA обновлений
   ArduinoOTA.setHostname(OTA_HOSTNAME);
@@ -293,7 +368,7 @@ void setup() {
   // Запуск веб-сервера
   setupWebServer();
   
-  LOG_PRINTLN(F("\n🌐 Web server started"));
+  LOG_PRINTF("\n🌐 Web server started at %lu ms\n", millis());
   LOG_PRINT(F("Open http://"));
   LOG_PRINT(WiFi.localIP().toString());
   LOG_PRINTLN(F("/ in your browser\n"));
@@ -375,13 +450,29 @@ void loop() {
   handleWebServer();
   diag.taskEnd();
   
-  // Пока время не синхронизировано — раз в 5 минут пробуем HTTP-фолбэк
-  // (после успешной синхронизации ветка ничего не делает, SNTP обновляет время сам)
-  EVERY_N_SECONDS(300) {
+  // Контроль синхронизации времени (раз в секунду, неблокирующе):
+  //  - один раз логируем момент, когда время стало валидным (обычно NTP за 1–3 с);
+  //  - если через TIME_SYNC_FALLBACK_MS после старта NTP так и не ответил —
+  //    пробуем HTTP-фолбэк, затем повторяем каждые TIME_SYNC_RETRY_MS.
+  EVERY_N_SECONDS(1) {
+    static bool timeSyncLogged = false;
+    static unsigned long lastHttpSyncAttempt = 0;
+    const unsigned long TIME_SYNC_FALLBACK_MS = 15000;
+    const unsigned long TIME_SYNC_RETRY_MS = 300000;
+
     time_t now = time(nullptr);
-    if (now < 1000000000) {
-      // Время не синхронизировано, пробуем снова
-      LOG_PRINTLN(F("⏰ Time not synced, attempting HTTP sync..."));
+    if (now >= 1000000000) {
+      if (!timeSyncLogged) {
+        timeSyncLogged = true;
+        struct tm timeinfo;
+        localtime_r(&now, &timeinfo);
+        LOG_PRINTF("✅ Time synchronized: %02d:%02d:%02d (uptime %lu ms)\n",
+                   timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, millis());
+      }
+    } else if (millis() >= TIME_SYNC_FALLBACK_MS &&
+               (lastHttpSyncAttempt == 0 || millis() - lastHttpSyncAttempt >= TIME_SYNC_RETRY_MS)) {
+      lastHttpSyncAttempt = millis();
+      LOG_PRINTLN(F("⏰ NTP not synced yet, attempting HTTP sync..."));
       syncTimeViaHTTP();
     }
   }
