@@ -26,7 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Сборка: `pio run -e d1_mini`
 - Чистая пересборка: `pio run -e d1_mini -t clean && pio run -e d1_mini`
-- Прошивка: `pio run -e d1_mini -t upload`
+- Прошивка: `pio run -e d1_mini -t upload` (полный деплой с проверкой — скилл `.claude/skills/deploy/`, скрипт `.claude/skills/deploy/deploy.sh`)
 - Serial-монитор: `pio device monitor -b 115200`
 - Тестов, линтера и тайпчека нет. Единственная автоматическая проверка — `pio run -e d1_mini`.
 - В `platformio.ini` стоит `upload_protocol = espota` и `upload_port = 192.168.100.222`, поэтому `-t upload` шьёт **по воздуху (OTA)**, а не по USB. Для первой прошивки по USB нужно временно переопределить протокол/порт.
@@ -48,13 +48,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Режимы гирлянды синхронизировать в четырёх местах: `src/config.h` (`TOTAL_MODES`), `src/led_modes.h` + `src/led_modes.cpp` (`runMode()` switch), `src/main.cpp` (`MODE_NAMES[]`), `src/webpage.h` (`modeNames`). Индексы и порядок должны совпадать.
 - Режимы подсветки: `src/config.h` (`TOTAL_BACKLIGHT_MODES`), `src/led_modes.cpp` (`runBacklightMode()`), `src/main.cpp` (`BACKLIGHT_MODE_NAMES[]`), UI/подписи в `src/webpage.h`.
 - Индекс режима в UI динамический (`id="currentModeIndex"` стартует с `(-/-)`); не хардкодить количество в HTML/JS.
-- Функции эффектов только заполняют `leds[]`; `FastLED.show()` вызывается централизованно в `src/main.cpp`.
+- Функции эффектов рисуют в буфер `frame[]` (static в `src/led_modes.cpp`), время берут из `animMillis()` / `animTimebase()` / `animSteps()` (общая скорость), а не из `millis()`. `presentFrame()` сглаживает `frame[]` → `leds[]`; `FastLED.show()` вызывается централизованно в `src/main.cpp`.
 - Изменение `TOTAL_MODES` меняет раскладку EEPROM — см. раздел ниже.
 
 ## Архитектура
 
 - **Одно глобальное состояние.** Всё настраиваемое живёт в `LEDState ledState` (`src/led_state.h`): питание, яркость, гирлянда (`modeSettings[TOTAL_MODES]`), расписания, `operationMode` (`MODE_GARLAND` / `MODE_BACKLIGHT`) и вложенный `BacklightSettings`. HTTP-хендлеры меняют `ledState` и выставляют `settingsChanged`, `loop()` сохраняет.
-- **Главный цикл (`src/main.cpp` `loop()`):** OTA → `handleWebServer()` → раз в секунду `checkSchedules()` → каждые 20 мс кадр: `runMode()` или `runBacklightMode()` в зависимости от `operationMode`, затем единственный `FastLED.show()` → авто-переключение режимов гирлянды / режимов и цветов подсветки (по `millis()`, без записи в EEPROM) → отложенный `saveLEDState()`. Каждая стадия обёрнута в `diag.taskStart/taskEnd` (`src/diagnostics.*`), предупреждения о медленных стадиях пишутся в лог. `GET /api/debug` отдаёт состояние времени/NTP и WiFi, а не тайминги.
+- **Главный цикл (`src/main.cpp` `loop()`):** OTA → `handleWebServer()` → раз в секунду `checkSchedules()` → каждые 20 мс кадр: `syncLedCount()` → `advanceAnimationClock()` → `runMode()` или `runBacklightMode()` в зависимости от `operationMode` → `presentFrame()` (сглаживание/кроссфейд) → единственный `FastLED.show()` → авто-переключение режимов гирлянды / режимов и цветов подсветки (по `millis()`, без записи в EEPROM) → отложенный `saveLEDState()`. Каждая стадия обёрнута в `diag.taskStart/taskEnd` (`src/diagnostics.*`), предупреждения о медленных стадиях пишутся в лог. `GET /api/debug` отдаёт время/NTP, WiFi и метрики здоровья (куча, фрагментация, тайминги цикла, FPS, сохранения EEPROM).
 - **Два независимых семейства эффектов** в `src/led_modes.cpp`: режимы гирлянды (используют `ModeSettings`: speed/scale/color1/color2/brightness/archived; архивные пропускаются автосвитчем) и режимы подсветки (используют `BacklightModeSettings` + палитру `backlight.colors[]` с плавными переходами между цветами, длительность зависит от RGB-расстояния — `BACKLIGHT_TRANSITION_*`).
 - **Веб-сервер** — `ESPAsyncWebServer` (асинхронный, хендлеры выполняются вне `loop()`): REST под `/api/*` + WebSocket `/ws/logs`, в который `LOG_PRINT/LOG_PRINTLN` (`src/logger.*`) транслируют кольцевой буфер логов. UI использует Tailwind с CDN (клиенту нужен интернет).
 - **Время:** NTP (`NTP_SERVER` + pool.ntp.org + time.cloudflare.com, `NTP_OFFSET`; SNTP сам ретраит в фоне) → HTTP-фолбэк `syncTimeViaHTTP()` (заголовок `Date` ответа `connectivitycheck.gstatic.com/generate_204`, раз в 5 мин пока время невалидно) → установка из браузера через `POST /api/time/set`. От времени зависят расписания и (при `WAIT_FOR_TIME_SYNC true`) старт эффектов. При статическом IP `WiFi.config()` обязательно вызывать с DNS (роутер + 8.8.8.8), иначе имена NTP/HTTP не резолвятся и время не синхронизируется.
