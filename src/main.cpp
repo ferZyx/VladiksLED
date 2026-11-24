@@ -55,51 +55,84 @@ unsigned long lastSettingsChangeAt = 0;
 // Был ли уже выведен «чёрный» кадр при выключенном питании (дальше show не нужен)
 bool powerOffFrameShown = false;
 
-// Функция синхронизации времени через HTTP API
+/**
+ * Переводит календарную дату (UTC) в число дней от 1970-01-01.
+ * Алгоритм Говарда Хиннанта (days_from_civil): не зависит от TZ и не требует timegm(),
+ * которого нет в newlib для ESP8266.
+ * @param y год (например, 2026)
+ * @param m месяц 1..12
+ * @param d день месяца 1..31
+ * @returns количество дней от эпохи Unix
+ */
+static long daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  const long era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097L + (long)doe - 719468L;
+}
+
+/**
+ * Разбирает HTTP-заголовок Date (RFC 7231, например "Tue, 24 Nov 2026 17:56:35 GMT")
+ * в Unix-время UTC.
+ * @param date значение заголовка Date
+ * @returns Unix-время или 0, если строку разобрать не удалось
+ */
+static time_t parseHttpDate(const String& date) {
+  char mon[4] = {0};
+  int day, year, hh, mm, ss;
+  // Пропускаем день недели ("Tue, "), дальше фиксированный формат
+  int comma = date.indexOf(',');
+  if (comma < 0) return 0;
+  if (sscanf(date.c_str() + comma + 1, " %d %3s %d %d:%d:%d", &day, mon, &year, &hh, &mm, &ss) != 6) {
+    return 0;
+  }
+  static const char MONTHS[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  const char* p = strstr(MONTHS, mon);
+  if (p == nullptr) return 0;
+  unsigned month = (unsigned)((p - MONTHS) / 3) + 1;
+  return (time_t)(daysFromCivil(year, month, (unsigned)day) * 86400L + hh * 3600L + mm * 60L + ss);
+}
+
+/**
+ * Фолбэк-синхронизация времени по HTTP, когда NTP (UDP 123) недоступен.
+ * Берём заголовок Date из лёгкого ответа 204 от Google: он есть у любого HTTP-сервера,
+ * не требует парсинга JSON и не зависит от сторонних time-API (worldtimeapi.org
+ * нестабилен и рвал соединение). Точность — до секунды, для расписаний достаточно.
+ * @returns true, если время установлено
+ */
 bool syncTimeViaHTTP() {
   WiFiClient client;
   HTTPClient http;
-  
-  LOG_PRINTLN(F("🌐 Fetching time via HTTP API..."));
-  
-  // Используем worldtimeapi.org для получения времени
-  // Timezone: Asia/Yekaterinburg (UTC+5)
-  http.begin(client, "http://worldtimeapi.org/api/timezone/Asia/Yekaterinburg");
-  http.setTimeout(5000);  // 5 секунд таймаут
-  
+
+  LOG_PRINTLN(F("🌐 Fetching time via HTTP Date header..."));
+
+  http.begin(client, "http://connectivitycheck.gstatic.com/generate_204");
+  http.setTimeout(5000);  // 5 секунд таймаут: вызывается из loop(), дольше блокировать нельзя
+  const char* headerKeys[] = {"Date"};
+  http.collectHeaders(headerKeys, 1);
+
   int httpCode = http.GET();
-  
-  if (httpCode == HTTP_CODE_OK) {
-    String payload = http.getString();
-    
-    // Ищем "unixtime": в JSON ответе
-    int timePos = payload.indexOf("\"unixtime\":");
-    if (timePos != -1) {
-      int startPos = timePos + 11;  // После "unixtime":
-      int endPos = payload.indexOf(",", startPos);
-      String timeStr = payload.substring(startPos, endPos);
-      
-      time_t timestamp = timeStr.toInt();
-      
-      if (timestamp > 1000000000) {
-        // Устанавливаем время
-        timeval tv = { timestamp, 0 };
-        settimeofday(&tv, nullptr);
-        
-        LOG_PRINT(F("✅ Time synced via HTTP: "));
-        LOG_PRINTLN(String(timestamp));
-        
-        http.end();
-        return true;
-      }
+  bool ok = false;
+
+  if (httpCode > 0) {
+    time_t timestamp = parseHttpDate(http.header("Date"));
+    if (timestamp > 1000000000) {
+      // Date приходит в UTC; смещение пояса применяет localtime() через TZ из configTime()
+      timeval tv = { timestamp, 0 };
+      settimeofday(&tv, nullptr);
+      LOG_PRINTF("✅ Time synced via HTTP: %ld\n", (long)timestamp);
+      ok = true;
+    } else {
+      LOG_PRINTLN(F("❌ HTTP Date header missing or invalid"));
     }
   } else {
-    LOG_PRINT(F("❌ HTTP request failed: "));
-    LOG_PRINTLN(String(httpCode));
+    LOG_PRINTF("❌ HTTP request failed: %d\n", httpCode);
   }
-  
+
   http.end();
-  return false;
+  return ok;
 }
 
 void setup() {
@@ -126,8 +159,13 @@ void setup() {
   IPAddress local_IP(STATIC_IP);
   IPAddress gateway(GATEWAY_IP);
   IPAddress subnet(SUBNET_MASK);
-  
-  if (!WiFi.config(local_IP, gateway, subnet)) {
+  // DNS обязателен: без него при статическом IP lwIP остаётся с DNS 0.0.0.0,
+  // и ни NTP (time.google.com), ни HTTP-фолбэк не могут разрешить имена хостов.
+  // Основной — роутер, запасной — публичный DNS Google.
+  IPAddress dns1(GATEWAY_IP);
+  IPAddress dns2(8, 8, 8, 8);
+
+  if (!WiFi.config(local_IP, gateway, subnet, dns1, dns2)) {
     LOG_PRINTLN(F("Failed to configure static IP"));
   }
 #endif
@@ -178,8 +216,10 @@ void setup() {
   LOG_PRINT(F("Timezone: UTC+"));
   LOG_PRINTLN(String(NTP_OFFSET / 3600));
   
-  // Настраиваем NTP (сервер, смещение в секундах, летнее время = 0)
-  configTime(NTP_OFFSET, 0, NTP_SERVER);
+  // Настраиваем NTP (смещение в секундах, летнее время = 0, до трёх серверов).
+  // SNTP в ядре ESP8266 сам повторяет запросы в фоне, поэтому даже если первые
+  // 5 секунд ожидания ниже не хватило, время подтянется позже без участия loop().
+  configTime(NTP_OFFSET, 0, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
   
   // Ждем синхронизации времени
   LOG_PRINT(F("Waiting for NTP sync"));
@@ -335,8 +375,9 @@ void loop() {
   handleWebServer();
   diag.taskEnd();
   
-  // Ресинхронизация времени каждый час через HTTP
-  EVERY_N_SECONDS(3600) {
+  // Пока время не синхронизировано — раз в 5 минут пробуем HTTP-фолбэк
+  // (после успешной синхронизации ветка ничего не делает, SNTP обновляет время сам)
+  EVERY_N_SECONDS(300) {
     time_t now = time(nullptr);
     if (now < 1000000000) {
       // Время не синхронизировано, пробуем снова
