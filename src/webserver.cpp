@@ -19,18 +19,34 @@
 #define HTTP_DELETE 0x04
 #endif
 
+#include "diagnostics.h"
+
 AsyncWebServer server(WEB_SERVER_PORT);
 AsyncWebSocket ws(LOG_WEBSOCKET_PATH);
 
-// Throttle защита
-unsigned long lastRequestTime = 0;
+// Минимальный непрерывный блок кучи, при котором ещё берёмся отвечать на GET.
+// Ниже — отдаём 503 сразу: лучше быстрый отказ (UI повторит), чем OOM-ребут.
+#define MIN_FREE_BLOCK_FOR_RESPONSE 4096
 
-bool checkThrottle() {
-  unsigned long now = millis();
-  if (now - lastRequestTime < MIN_REQUEST_INTERVAL) {
-    return false;  // Слишком частые запросы
-  }
-  lastRequestTime = now;
+// Максимум одновременных WebSocket-клиентов логов: каждый держит свою очередь сообщений
+#define MAX_WS_CLIENTS 2
+
+/**
+ * Заглушка onRequest для POST-маршрутов: ответ уже отправлен из body-хендлера.
+ * @param request входящий запрос
+ */
+static void onBodyRequestDone(AsyncWebServerRequest *request) {}
+
+/**
+ * Проверяет запас памяти перед формированием ответа.
+ * @param request входящий запрос
+ * @return true, если памяти мало и запросу уже ответили 503
+ */
+static bool rejectIfLowMemory(AsyncWebServerRequest *request) {
+  if (ESP.getMaxFreeBlockSize() >= MIN_FREE_BLOCK_FOR_RESPONSE) return false;
+  AsyncWebServerResponse *response = request->beginResponse(503, "application/json", "{\"error\":\"Low memory\"}");
+  response->addHeader("Retry-After", "1");
+  request->send(response);
   return true;
 }
 
@@ -38,11 +54,15 @@ bool checkThrottle() {
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
                void *arg, uint8_t *data, size_t len) {
   if (type == WS_EVT_CONNECT) {
+    // Ограничиваем число клиентов: старые вкладки иначе копят очереди и съедают кучу
+    if (server->count() > MAX_WS_CLIENTS) {
+      client->close();
+      return;
+    }
     LOG_PRINTF("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
     
     // Отправляем историю логов новому клиенту
-    String history = logger.getBufferAsJson();
-    client->text("{\"type\":\"history\",\"logs\":" + history + "}");
+    client->text(logger.getHistoryJson());
     
   } else if (type == WS_EVT_DISCONNECT) {
     LOG_PRINTF("WebSocket client #%u disconnected\n", client->id());
@@ -68,6 +88,7 @@ void setupWebServer() {
   
   // Главная страница
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (rejectIfLowMemory(request)) return;
     request->send_P(200, "text/html", WEBPAGE);
   });
   
@@ -85,56 +106,56 @@ void setupWebServer() {
   // the body handler is the last parameter
   // IMPORTANT: Register more specific routes FIRST (e.g., /api/mode/settings before /api/mode)
   server.on("/api/power", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/power complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetPower);
   server.on("/api/brightness", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/brightness complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetBrightness);
   server.on("/api/leds", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/leds complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetLEDs);
   // Mode-related routes - more specific first!
   server.on("/api/mode/settings", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/mode/settings complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetModeSettings);
   server.on("/api/mode/reset", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/mode/reset complete"); }, 
+    onBodyRequestDone, 
     NULL, handleResetModeSettings);
   server.on("/api/mode/archive", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/mode/archive complete"); }, 
+    onBodyRequestDone, 
     NULL, handleToggleModeArchive);
   server.on("/api/mode", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/mode complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetMode);
   // Other routes
   server.on("/api/auto-switch", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/auto-switch complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetAutoSwitch);
   server.on("/api/schedules", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/schedules complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetSchedule);
   server.on("/api/time/set", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/time/set complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetTime);
   
   // Backlight API endpoints (more specific routes FIRST)
   server.on("/api/operation-mode", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/operation-mode complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetOperationMode);
   server.on("/api/backlight/mode/settings", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/mode/settings complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetBacklightModeSettings);
   server.on("/api/backlight/mode", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/mode complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetBacklightMode);
   server.on("/api/backlight/active-color", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/active-color complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetBacklightActiveColor);
   server.on("/api/backlight/colors", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/colors complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetBacklightColor);
   server.on("/api/backlight/auto-switch", HTTP_POST, 
-    [](AsyncWebServerRequest *request){ LOG_PRINTLN("POST /api/backlight/auto-switch complete"); }, 
+    onBodyRequestDone, 
     NULL, handleSetBacklightAutoSwitch);
   
   // DELETE request
@@ -142,12 +163,12 @@ void setupWebServer() {
   server.on("/api/backlight/colors", HTTP_DELETE, handleDeleteBacklightColor);
   
   server.onNotFound([](AsyncWebServerRequest *request){
-    LOG_PRINTF(">>> 404 NOT FOUND: %s %s\n", request->methodToString(), request->url().c_str());
+    LOG_PRINTF("404: %s %s\n", request->methodToString(), request->url().c_str());
     request->send(404, "text/plain", "Not Found");
   });
   
   server.begin();
-  LOG_PRINTLN("HTTP server started");
+  LOG_PRINTLN(F("HTTP server started"));
 }
 
 void handleWebServer() {
@@ -157,8 +178,7 @@ void handleWebServer() {
 }
 
 void handleGetState(AsyncWebServerRequest *request) {
-  unsigned long startTime = millis();
-  uint32_t freeHeapBefore = ESP.getFreeHeap();
+  if (rejectIfLowMemory(request)) return;
   
   // Используем chunked response чтобы не держать весь JSON в памяти
   AsyncResponseStream *response = request->beginResponseStream("application/json");
@@ -168,7 +188,7 @@ void handleGetState(AsyncWebServerRequest *request) {
   response->printf("\"brightness\":%d,", ledState.brightness);
   response->printf("\"numLeds\":%d,", ledState.numLeds);
   response->printf("\"currentMode\":%d,", ledState.currentMode);
-  response->printf("\"autoSwitchDelay\":%lu,", ledState.autoSwitchDelay);
+  response->printf("\"autoSwitchDelay\":%u,", (unsigned)ledState.autoSwitchDelay);
   response->printf("\"randomOrder\":%s,", ledState.randomOrder ? "true" : "false");
   response->printf("\"operationMode\":%d,", (uint8_t)ledState.operationMode);
   
@@ -186,16 +206,12 @@ void handleGetState(AsyncWebServerRequest *request) {
   
   request->send(response);
   
-  unsigned long elapsed = millis() - startTime;
-  uint32_t freeHeapAfter = ESP.getFreeHeap();
-  LOG_PRINTF("API: /api/state - %lums, heap: %u->%u\n", elapsed, freeHeapBefore, freeHeapAfter);
 }
 
 void handleSetPower(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -212,10 +228,9 @@ void handleSetPower(AsyncWebServerRequest *request, uint8_t *data, size_t len, s
 }
 
 void handleSetBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -232,10 +247,9 @@ void handleSetBrightness(AsyncWebServerRequest *request, uint8_t *data, size_t l
 }
 
 void handleSetLEDs(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -254,10 +268,9 @@ void handleSetLEDs(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
 }
 
 void handleSetMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -277,27 +290,13 @@ void handleSetMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
 }
 
 void handleSetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  // FIRST: Log that request arrived (before ANY checks)
-  LOG_PRINTF(">>> handleSetModeSettings CALLED: len=%d, index=%d, total=%d\n", len, index, total);
   
   // Handle chunked body - only process when we have complete data
   if (index + len != total) {
-    LOG_PRINTF("API: SetModeSettings - Chunked data, waiting for more (got %d/%d)\n", index + len, total);
     return;  // Wait for more data
   }
   
-  if (!checkThrottle()) {
-    LOG_PRINTLN("API: SetModeSettings - THROTTLED");
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
   
-  // Log raw request body for debugging
-  char rawBody[128];
-  size_t copyLen = len < 127 ? len : 127;
-  memcpy(rawBody, data, copyLen);
-  rawBody[copyLen] = '\0';
-  LOG_PRINTF("API: SetModeSettings - Raw body: %s\n", rawBody);
   
   StaticJsonDocument<512> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -309,13 +308,12 @@ void handleSetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t
   }
   
   if (!doc.containsKey("modeId")) {
-    LOG_PRINTLN("API: SetModeSettings - Missing modeId field");
+    LOG_PRINTLN(F("API: SetModeSettings - Missing modeId field"));
     request->send(400, "application/json", "{\"error\":\"Missing modeId\"}");
     return;
   }
   
   int modeId = doc["modeId"];
-  LOG_PRINTF("API: SetModeSettings - Mode %d, Heap: %u\n", modeId, ESP.getFreeHeap());
   
   if (modeId < 0 || modeId >= TOTAL_MODES) {
     LOG_PRINTF("API: SetModeSettings - Invalid modeId: %d (max: %d)\n", modeId, TOTAL_MODES - 1);
@@ -323,12 +321,6 @@ void handleSetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t
     return;
   }
   
-  // Log current values before update
-  LOG_PRINTF("API: Mode %d BEFORE: speed=%d, scale=%d, brightness=%d\n", 
-             modeId, 
-             ledState.modeSettings[modeId].speed,
-             ledState.modeSettings[modeId].scale,
-             ledState.modeSettings[modeId].brightness);
   
   if (doc.containsKey("speed")) {
     ledState.modeSettings[modeId].speed = doc["speed"];
@@ -340,19 +332,13 @@ void handleSetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t
     ledState.modeSettings[modeId].brightness = doc["brightness"];
   }
   
-  // Log values after update
-  LOG_PRINTF("API: Mode %d AFTER: speed=%d, scale=%d, brightness=%d\n", 
-             modeId, 
-             ledState.modeSettings[modeId].speed,
-             ledState.modeSettings[modeId].scale,
-             ledState.modeSettings[modeId].brightness);
   
   settingsChanged = true;
-  LOG_PRINTF("API: SetModeSettings - Mode %d updated successfully, settingsChanged=true\n", modeId);
   request->send(200, "application/json", "{\"success\":true}");
 }
 
 void handleGetModeSettings(AsyncWebServerRequest *request) {
+  if (rejectIfLowMemory(request)) return;
   if (request->hasParam("modeId")) {
     int modeId = request->getParam("modeId")->value().toInt();
     
@@ -377,17 +363,11 @@ void handleGetModeSettings(AsyncWebServerRequest *request) {
 }
 
 void handleResetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  LOG_PRINTF(">>> handleResetModeSettings CALLED: len=%d, index=%d, total=%d\n", len, index, total);
   
   if (index + len != total) {
     return;  // Wait for complete data
   }
   
-  if (!checkThrottle()) {
-    LOG_PRINTLN("API: ResetModeSettings - THROTTLED");
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -418,24 +398,12 @@ void handleResetModeSettings(AsyncWebServerRequest *request, uint8_t *data, size
 }
 
 void handleToggleModeArchive(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  LOG_PRINTF(">>> handleToggleModeArchive CALLED: len=%d, index=%d, total=%d\n", len, index, total);
   
   if (index + len != total) {
     return;  // Wait for complete data
   }
   
-  if (!checkThrottle()) {
-    LOG_PRINTLN("API: ToggleModeArchive - THROTTLED");
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
   
-  // Log raw body
-  char rawBody[64];
-  size_t copyLen = len < 63 ? len : 63;
-  memcpy(rawBody, data, copyLen);
-  rawBody[copyLen] = '\0';
-  LOG_PRINTF("API: ToggleModeArchive - Raw body: %s\n", rawBody);
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -461,10 +429,9 @@ void handleToggleModeArchive(AsyncWebServerRequest *request, uint8_t *data, size
 }
 
 void handleSetAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -482,6 +449,7 @@ void handleSetAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t l
 }
 
 void handleGetSchedules(AsyncWebServerRequest *request) {
+  if (rejectIfLowMemory(request)) return;
   DynamicJsonDocument doc(2048);
   
   JsonArray schedules = doc.createNestedArray("schedules");
@@ -501,10 +469,9 @@ void handleGetSchedules(AsyncWebServerRequest *request) {
 }
 
 void handleSetSchedule(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<512> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -544,10 +511,6 @@ void handleSetSchedule(AsyncWebServerRequest *request, uint8_t *data, size_t len
 }
 
 void handleDeleteSchedule(AsyncWebServerRequest *request) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
   
   if (request->hasParam("id")) {
     int id = request->getParam("id")->value().toInt();
@@ -569,6 +532,7 @@ void handleDeleteSchedule(AsyncWebServerRequest *request) {
 }
 
 void handleGetTime(AsyncWebServerRequest *request) {
+  if (rejectIfLowMemory(request)) return;
   time_t now = time(nullptr);
   struct tm timeinfo;
   localtime_r(&now, &timeinfo);
@@ -591,10 +555,9 @@ void handleGetTime(AsyncWebServerRequest *request) {
 }
 
 void handleSetTime(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -606,7 +569,7 @@ void handleSetTime(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
     timeval tv = { timestamp, 0 };
     settimeofday(&tv, nullptr);
     
-    LOG_PRINT("⏰ Time set manually to: ");
+    LOG_PRINT(F("⏰ Time set manually to: "));
     LOG_PRINTLN(String(timestamp));
     
     request->send(200, "application/json", "{\"success\":true}");
@@ -617,6 +580,7 @@ void handleSetTime(AsyncWebServerRequest *request, uint8_t *data, size_t len, si
 }
 
 void handleGetDebug(AsyncWebServerRequest *request) {
+  if (rejectIfLowMemory(request)) return;
   DynamicJsonDocument doc(1024);
   
   // NTP info
@@ -649,7 +613,29 @@ void handleGetDebug(AsyncWebServerRequest *request) {
   
   // Uptime
   doc["uptimeMs"] = millis();
-  
+
+  // ===== Метрики здоровья устройства =====
+  // freeHeap — свободно всего; maxFreeBlock — самый большой непрерывный кусок
+  // (именно он решает, хватит ли памяти на ответ); fragmentation — % фрагментации
+  doc["freeHeap"] = ESP.getFreeHeap();
+  doc["maxFreeBlock"] = ESP.getMaxFreeBlockSize();
+  doc["heapFragmentation"] = ESP.getHeapFragmentation();
+  doc["resetReason"] = ESP.getResetReason();
+  doc["wsClients"] = ws.count();
+
+  const DiagSnapshot& d = diag.snapshot();
+  doc["minFreeHeap"] = d.minFreeHeap;
+  doc["minMaxFreeBlock"] = d.minMaxFreeBlock;
+  doc["loopsPerSec"] = d.loopsPerSec;
+  doc["maxLoopMs"] = d.maxLoopMsWindow;
+  doc["maxLoopMsBoot"] = d.maxLoopMsBoot;
+  doc["ledFps"] = d.ledFps;
+  doc["maxLedFrameMs"] = d.maxLedFrameMs;
+  doc["slowestTask"] = d.slowestTask;
+  doc["slowestTaskMs"] = d.slowestTaskMs;
+  doc["eepromSaves"] = d.eepromSaves;
+  doc["lastEepromSaveMs"] = d.lastSaveMs;
+
   String response;
   serializeJson(doc, response);
   request->send(200, "application/json", response);
@@ -660,10 +646,9 @@ void handleGetDebug(AsyncWebServerRequest *request) {
 // =====================================================
 
 void handleSetOperationMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -683,16 +668,16 @@ void handleSetOperationMode(AsyncWebServerRequest *request, uint8_t *data, size_
 }
 
 void handleGetBacklightState(AsyncWebServerRequest *request) {
-  unsigned long startTime = millis();
+  if (rejectIfLowMemory(request)) return;
   
   AsyncResponseStream *response = request->beginResponseStream("application/json");
   
   response->print("{");
   response->printf("\"currentMode\":%d,", ledState.backlight.currentMode);
-  response->printf("\"modeAutoSwitchDelay\":%lu,", ledState.backlight.modeAutoSwitchDelay);
+  response->printf("\"modeAutoSwitchDelay\":%u,", (unsigned)ledState.backlight.modeAutoSwitchDelay);
   response->printf("\"modeRandomOrder\":%s,", ledState.backlight.modeRandomOrder ? "true" : "false");
   response->printf("\"activeColorIndex\":%d,", ledState.backlight.activeColorIndex);
-  response->printf("\"colorAutoSwitchDelay\":%lu,", ledState.backlight.colorAutoSwitchDelay);
+  response->printf("\"colorAutoSwitchDelay\":%u,", (unsigned)ledState.backlight.colorAutoSwitchDelay);
   response->printf("\"colorRandomOrder\":%s,", ledState.backlight.colorRandomOrder ? "true" : "false");
   
   // Настройки режимов подсветки
@@ -709,11 +694,10 @@ void handleGetBacklightState(AsyncWebServerRequest *request) {
   
   request->send(response);
   
-  LOG_PRINTF("API: /api/backlight/state - %lums\n", millis() - startTime);
 }
 
 void handleGetBacklightColors(AsyncWebServerRequest *request) {
-  unsigned long startTime = millis();
+  if (rejectIfLowMemory(request)) return;
   
   AsyncResponseStream *response = request->beginResponseStream("application/json");
   
@@ -734,14 +718,12 @@ void handleGetBacklightColors(AsyncWebServerRequest *request) {
   
   request->send(response);
   
-  LOG_PRINTF("API: /api/backlight/colors - %lums\n", millis() - startTime);
 }
 
 void handleSetBacklightMode(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -764,12 +746,7 @@ void handleSetBacklightModeSettings(AsyncWebServerRequest *request, uint8_t *dat
   // Wait for complete data
   if (index + len != total) return;
   
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
   
-  LOG_PRINTF("API: Backlight mode settings received, len=%d\n", len);
   
   StaticJsonDocument<512> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -781,13 +758,12 @@ void handleSetBacklightModeSettings(AsyncWebServerRequest *request, uint8_t *dat
   }
   
   if (!doc.containsKey("modeId")) {
-    LOG_PRINTLN("API: Missing modeId");
+    LOG_PRINTLN(F("API: Missing modeId"));
     request->send(400, "application/json", "{\"error\":\"Missing modeId\"}");
     return;
   }
   
   int modeId = doc["modeId"];
-  LOG_PRINTF("API: modeId=%d, TOTAL_BACKLIGHT_MODES=%d\n", modeId, TOTAL_BACKLIGHT_MODES);
   
   if (modeId < 0 || modeId >= TOTAL_BACKLIGHT_MODES) {
     request->send(400, "application/json", "{\"error\":\"Invalid mode ID\"}");
@@ -813,10 +789,9 @@ void handleSetBacklightModeSettings(AsyncWebServerRequest *request, uint8_t *dat
 }
 
 void handleSetBacklightActiveColor(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<200> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -836,10 +811,9 @@ void handleSetBacklightActiveColor(AsyncWebServerRequest *request, uint8_t *data
 }
 
 void handleSetBacklightColor(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<256> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);
@@ -893,10 +867,6 @@ void handleSetBacklightColor(AsyncWebServerRequest *request, uint8_t *data, size
 }
 
 void handleDeleteBacklightColor(AsyncWebServerRequest *request) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
   
   if (request->hasParam("index")) {
     int idx = request->getParam("index")->value().toInt();
@@ -936,10 +906,9 @@ void handleDeleteBacklightColor(AsyncWebServerRequest *request) {
 }
 
 void handleSetBacklightAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (!checkThrottle()) {
-    request->send(429, "application/json", "{\"error\":\"Too many requests\"}");
-    return;
-  }
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
   
   StaticJsonDocument<256> doc;
   DeserializationError error = deserializeJson(doc, (const char*)data, len);

@@ -72,6 +72,10 @@ const char WEBPAGE[] PROGMEM = R"rawliteral(
     </style>
 </head>
 <body class="p-2">
+    <!-- Индикатор потери связи: показывается, когда запросы к устройству не проходят -->
+    <div id="connectionBanner" class="hidden fixed top-0 left-0 right-0 z-50 bg-red-600 text-white text-center text-sm py-1">
+        ⚠️ Нет связи с гирляндой — повторяю…
+    </div>
     <div class="max-w-6xl mx-auto">
         <!-- Header -->
         <div class="glass rounded-2xl shadow-2xl p-3 mb-3">
@@ -507,21 +511,128 @@ const backlightModeNames = [
             console.log('[DEBUG] ' + msg);
         }
 
-        // API calls
-        async function apiCall(endpoint, data = null) {
+        // ===== Сетевой слой =====
+        // ESP8266 тянет лишь несколько одновременных соединений и мало памяти,
+        // поэтому все запросы идут строго по одному через очередь.
+        // POST-запросы с одинаковым ключом (endpoint + modeId/index/id) склеиваются:
+        // если предыдущий ещё не ушёл — отправится только последнее значение.
+        const REQUEST_TIMEOUT_MS = 6000;
+        const requestQueue = [];
+        let requestInFlight = false;
+        let lastUserActionAt = 0;      // время последнего действия пользователя (для паузы опроса)
+        let connectionOk = true;
+
+        /**
+         * Отмечает действие пользователя: на несколько секунд опрос состояния
+         * не будет перетирать значения в интерфейсе.
+         */
+        function markUserAction() {
+            lastUserActionAt = Date.now();
+        }
+
+        /**
+         * Показывает/скрывает индикатор потери связи с устройством.
+         * @param {boolean} ok - есть ли связь
+         */
+        function setConnectionStatus(ok) {
+            if (ok === connectionOk) return;
+            connectionOk = ok;
+            const el = document.getElementById('connectionBanner');
+            if (el) el.classList.toggle('hidden', ok);
+        }
+
+        /**
+         * Ключ склейки для POST: одинаковые настройки одного объекта заменяют друг друга.
+         * @param {string} endpoint
+         * @param {object} data
+         * @returns {string}
+         */
+        function coalesceKey(endpoint, data) {
+            const id = data.modeId ?? data.index ?? data.id ?? '';
+            return endpoint + '#' + id;
+        }
+
+        /**
+         * Выполняет один HTTP-запрос с таймаутом.
+         * @param {{method:string, endpoint:string, data:object|null}} req
+         * @returns {Promise<object|null>} JSON ответа или null при ошибке
+         */
+        async function performRequest(req) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
             try {
-                const options = data ? {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                } : { method: 'GET' };
-                
-                const response = await fetch(endpoint, options);
-                return await response.json();
+                const options = { method: req.method, signal: controller.signal };
+                if (req.data) {
+                    options.headers = { 'Content-Type': 'application/json' };
+                    options.body = JSON.stringify(req.data);
+                }
+                const response = await fetch(req.endpoint, options);
+                const json = await response.json().catch(() => null);
+                setConnectionStatus(true);
+                if (!response.ok) {
+                    console.warn('API', req.endpoint, response.status, json);
+                    // 503 = устройству не хватает памяти; это «временно», а не ошибка данных
+                    return response.status === 503 ? null : json;
+                }
+                return json;
             } catch (error) {
-                console.error('API Error:', error);
+                console.error('API Error:', req.endpoint, error);
+                setConnectionStatus(false);
                 return null;
+            } finally {
+                clearTimeout(timer);
             }
+        }
+
+        /**
+         * Разбирает очередь: строго один запрос в полёте.
+         */
+        async function drainQueue() {
+            if (requestInFlight) return;
+            requestInFlight = true;
+            while (requestQueue.length > 0) {
+                const req = requestQueue.shift();
+                const result = await performRequest(req);
+                req.resolvers.forEach(resolve => resolve(result));
+            }
+            requestInFlight = false;
+        }
+
+        /**
+         * Ставит запрос в очередь.
+         * @param {string} method - GET/POST/DELETE
+         * @param {string} endpoint
+         * @param {object|null} data - тело для POST
+         * @returns {Promise<object|null>}
+         */
+        function apiRequest(method, endpoint, data = null) {
+            return new Promise(resolve => {
+                if (method === 'POST' && data) {
+                    const key = coalesceKey(endpoint, data);
+                    const pending = requestQueue.find(r => r.key === key);
+                    if (pending) {
+                        // Ещё не отправлен — просто подменяем данные на свежие
+                        pending.data = data;
+                        pending.resolvers.push(resolve);
+                        return;
+                    }
+                    requestQueue.push({ method, endpoint, data, key, resolvers: [resolve] });
+                } else {
+                    requestQueue.push({ method, endpoint, data, key: null, resolvers: [resolve] });
+                }
+                drainQueue();
+            });
+        }
+
+        /**
+         * Совместимая обёртка: GET без данных, POST с данными.
+         * @param {string} endpoint
+         * @param {object|null} data
+         * @returns {Promise<object|null>}
+         */
+        function apiCall(endpoint, data = null) {
+            if (data) markUserAction();
+            return apiRequest(data ? 'POST' : 'GET', endpoint, data);
         }
 
         // Update power toggle visual state
@@ -543,7 +654,9 @@ const backlightModeNames = [
             const checkbox = document.getElementById('powerToggle');
             const newState = !checkbox.checked;
             updatePowerToggleUI(newState);
-            await apiCall('/api/power', { on: newState });
+            const result = await apiCall('/api/power', { on: newState });
+            // Запрос не прошёл — возвращаем UI к реальному состоянию устройства
+            if (!result || !result.success) await loadState(false);
         }
 
         // Update brightness UI only (no API call)
@@ -555,6 +668,7 @@ const backlightModeNames = [
 
         // Update brightness with debounce (sends API call)
         function updateBrightness(value) {
+            markUserAction();
             updateBrightnessUI(value);
             
             clearTimeout(brightnessDebounceTimer);
@@ -568,7 +682,8 @@ const backlightModeNames = [
         async function setOperationMode(mode) {
             operationMode = mode;
             updateOperationModeUI();
-            await apiCall('/api/operation-mode', { mode: mode });
+            const result = await apiCall('/api/operation-mode', { mode: mode });
+            if (!result || !result.success) await loadState(false);
         }
         
         function updateOperationModeUI() {
@@ -602,9 +717,9 @@ const backlightModeNames = [
         async function selectMode(modeId) {
             debugLog('selectMode: selecting mode ' + modeId + ' (was ' + currentModeId + ')');
             currentModeId = modeId;
-            const result = await apiCall('/api/mode', { mode: modeId });
-            debugLog('selectMode: API result: ' + JSON.stringify(result));
             updateModeCards();
+            const result = await apiCall('/api/mode', { mode: modeId });
+            if (!result || !result.success) await loadState(false);
         }
 
         // Update mode cards visual state
@@ -697,6 +812,7 @@ const backlightModeNames = [
 
         // Update mode settings with debounce (auto-apply)
         function updateModeSettings() {
+            markUserAction();
             clearTimeout(modeSettingsDebounceTimer);
             modeSettingsDebounceTimer = setTimeout(async () => {
                 // CRITICAL: Use editingModeId, NOT currentModeId!
@@ -752,8 +868,13 @@ const backlightModeNames = [
         }
 
         // Load state from ESP
-        async function loadState() {
-            debugLog('loadState: fetching state... (editingModeId=' + editingModeId + ')');
+        let lastArchivedSignature = '';  // чтобы перерисовывать сетку режимов только при изменении архива
+
+        /**
+         * Загружает состояние устройства и обновляет UI.
+         * @param {boolean} includeBacklight - заодно загрузить палитру/режимы подсветки
+         */
+        async function loadState(includeBacklight = true) {
             const state = await apiCall('/api/state');
             if (state) {
                 updatePowerToggleUI(state.power);
@@ -780,14 +901,48 @@ const backlightModeNames = [
                 }
                 
                 updateBrightnessUI(state.brightness);  // UI only, no API call!
-                renderModes();
+
+                // Полная перерисовка сетки — только если поменялся состав архива
+                const signature = (state.modeSettings || []).map(m => m.archived ? 1 : 0).join('');
+                if (signature !== lastArchivedSignature) {
+                    lastArchivedSignature = signature;
+                    renderModes();
+                }
                 updateModeCards();
-            } else {
-                debugLog('loadState: failed to fetch state');
             }
             
-            // Also load backlight state
-            await loadBacklightState();
+            if (includeBacklight) {
+                await loadBacklightState();
+            }
+        }
+
+        // ===== Периодический опрос =====
+        // Нужен, чтобы видеть авто-переключение режимов и изменения с других устройств.
+        const POLL_INTERVAL_MS = 10000;
+        const USER_ACTION_QUIET_MS = 5000;
+
+        /**
+         * Открыто ли сейчас какое-либо модальное окно (пользователь что-то редактирует).
+         * @returns {boolean}
+         */
+        function isAnyModalOpen() {
+            return Array.from(document.querySelectorAll('[id$="Modal"]'))
+                .some(el => !el.classList.contains('hidden'));
+        }
+
+        /**
+         * Один тик опроса. Пропускается, если вкладка скрыта, пользователь только что
+         * что-то менял, открыт модал или очередь запросов не пуста —
+         * так опрос не перетирает значения «под пальцем» и не грузит устройство.
+         */
+        async function pollState() {
+            const busy = requestInFlight || requestQueue.length > 0;
+            const recentlyTouched = Date.now() - lastUserActionAt < USER_ACTION_QUIET_MS;
+            if (!document.hidden && !busy && !recentlyTouched && !isAnyModalOpen()) {
+                // В режиме подсветки дополнительно обновляем текущий цвет/режим
+                await loadState(operationMode === 1);
+            }
+            setTimeout(pollState, POLL_INTERVAL_MS);
         }
         
         // Load backlight state
@@ -997,8 +1152,9 @@ const backlightModeNames = [
         async function deleteBacklightColor(index) {
             if (!confirm('Удалить этот цвет?')) return;
             
-            const result = await fetch(`/api/backlight/colors?index=${index}`, { method: 'DELETE' });
-            if (result.ok) {
+            markUserAction();
+            const result = await apiRequest('DELETE', `/api/backlight/colors?index=${index}`);
+            if (result && result.success) {
                 await loadBacklightState();
             }
         }
@@ -1039,6 +1195,7 @@ const backlightModeNames = [
         function previewColorChange() {
             if (editingColorIndex === null) return;  // Only for editing mode
             
+            markUserAction();
             clearTimeout(colorPreviewTimer);
             colorPreviewTimer = setTimeout(async () => {
                 const hex = document.getElementById('newColorPicker').value;
@@ -1171,6 +1328,7 @@ const backlightModeNames = [
         // Update backlight mode settings
         let blModeSettingsTimer = null;
         function updateBacklightModeSettings() {
+            markUserAction();
             clearTimeout(blModeSettingsTimer);
             blModeSettingsTimer = setTimeout(async () => {
                 if (editingBacklightModeId === null) return;
@@ -1356,8 +1514,9 @@ const backlightModeNames = [
                 return;
             }
             
-            const result = await fetch(`/api/schedules?id=${id}`, { method: 'DELETE' });
-            if (result.ok) {
+            markUserAction();
+            const result = await apiRequest('DELETE', `/api/schedules?id=${id}`);
+            if (result && result.success) {
                 await loadSchedules();
             }
         }
@@ -1365,6 +1524,12 @@ const backlightModeNames = [
         // Sync time from browser to ESP8266 (fallback for NTP issues)
         async function syncTimeFromBrowser() {
             const timestamp = Math.floor(Date.now() / 1000);  // Current Unix timestamp
+            // Не перебиваем NTP без нужды: ставим время, только если оно не задано или уехало > 60 с
+            const deviceTime = await apiCall('/api/time');
+            if (deviceTime && deviceTime.timestamp > 1000000000 &&
+                Math.abs(deviceTime.timestamp - timestamp) < 60) {
+                return;
+            }
             console.log('Syncing time from browser:', timestamp, new Date());
             
             const result = await apiCall('/api/time/set', { timestamp: timestamp });
@@ -1503,9 +1668,7 @@ const backlightModeNames = [
             // Sync time from browser first
             syncTimeFromBrowser();
             
-            loadState();
-            // Refresh state every 5 seconds
-            setInterval(loadState, 5000);
+            loadState(true).then(() => setTimeout(pollState, POLL_INTERVAL_MS));
             
             // Connect WebSocket for logs
             connectWebSocket();

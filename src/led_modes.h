@@ -9,6 +9,9 @@ extern CRGB leds[MAX_LEDS];
 // Инициализация LED
 void initLEDs();
 
+// Сузить вывод FastLED до ledState.numLeds (вызывать при изменении числа LED)
+void syncLedCount();
+
 // Запуск режима гирлянды
 void runMode(uint8_t mode);
 

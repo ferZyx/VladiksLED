@@ -1,0 +1,12 @@
+Web stability design (Nov 2026). Root causes of laggy/desynced web UI were: free heap only ~18 KB idle (8 parallel GETs => OOM reboot), EEPROM commit on every slider change, FastLED.show() pushing all MAX_LEDS (300 => ~9 ms CPU) every frame, global 100 ms request throttle returning 429 silently, 5 s polling of 3 endpoints overwriting sliders, verbose per-request logs (Serial + WS + String ring buffer).
+
+Current rules:
+- Persistence is debounced in main.cpp loop(): handlers set settingsChanged; loop moves it to settingsSavePending and calls saveLEDState() only after SETTINGS_SAVE_DELAY_MS (3000) of no changes. Still never save in handlers.
+- No request throttle anymore (checkThrottle removed). All POST body handlers start with `if (index + len != total) return;`. POST routes use shared no-op onRequest `onBodyRequestDone`.
+- GET handlers and "/" call rejectIfLowMemory(): 503 + Retry-After when ESP.getMaxFreeBlockSize() < 4096.
+- WebSocket /ws/logs: max 2 clients (MAX_WS_CLIENTS); history = last 25 entries via logger.getHistoryJson().
+- Logger (src/logger.*): fixed char ring buffer LOG_RING_SIZE (<=30) x LOG_MESSAGE_MAX_LEN 80, UTF-8 safe trim, WS broadcast skipped when !ws->availableForWriteAll(). Keep handler logs to one short line; no per-GET logging.
+- LED output length: syncLedCount() (led_modes.cpp) calls FastLED[0].setLeds(leds, numLeds), blanking the tail once when shrinking; called every frame before effects. Power off: effects only fill black, main shows one black frame then skips show().
+- Diagnostics (src/diagnostics.*): DiagSnapshot over 5 s window (loopsPerSec, maxLoopMs, ledFps, maxLedFrameMs, slowestTask, minFreeHeap, minMaxFreeBlock, eepromSaves, lastSaveMs); warnings rate-limited to 1/10 s. GET /api/debug exposes these plus freeHeap, maxFreeBlock, heapFragmentation, resetReason, wsClients.
+- Web UI (webpage.h JS): all requests go through a single-flight queue apiRequest(method, endpoint, data) with 6 s timeout; queued POSTs with the same key (endpoint + modeId/index/id) are coalesced (latest wins). apiCall() kept as wrapper. Polling via pollState() every 10 s, skipped when tab hidden, queue busy, any *Modal open, or user acted in last 5 s (markUserAction). Periodic poll fetches backlight data only in backlight mode. Mode grid re-rendered only if archived set changed. Browser time is pushed only if device time invalid or drift > 60 s. Red #connectionBanner shows on network failure.
+- Known remaining perf issue: Tailwind CDN JIT runtime is heavy on phones; planned to replace with static CSS during UI redesign.

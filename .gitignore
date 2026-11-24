@@ -18,3 +18,4 @@ referenses/
 /.mcp.json
 /.codex/*
 !/.codex/*.example
+temp/

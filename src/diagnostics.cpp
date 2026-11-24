@@ -2,70 +2,125 @@
 
 Diagnostics diag;
 
-Diagnostics::Diagnostics() {
-    loopStartTime = 0;
-    lastLogTime = 0;
-    frameCount = 0;
-    currentTask = {nullptr, 0, 0, 0, 0};
+/**
+ * Инициализирует счётчики; минимумы кучи стартуют с максимального значения.
+ */
+Diagnostics::Diagnostics()
+    : loopStartTime(0), windowStart(0), lastWarnTime(0),
+      taskName(nullptr), taskStartTime(0),
+      loopCount(0), ledFrames(0), maxLoopMs(0), maxLedMs(0),
+      worstTask(nullptr), worstTaskMs(0) {
+    memset(&snap, 0, sizeof(snap));
+    snap.minFreeHeap = UINT32_MAX;
+    snap.minMaxFreeBlock = UINT32_MAX;
+    snap.slowestTask = "";
 }
 
+/**
+ * Пишет предупреждение в лог не чаще DIAG_WARN_INTERVAL_MS.
+ * @param reason   описание
+ * @param duration длительность, мс
+ */
+void Diagnostics::warn(const char* reason, unsigned long duration) {
+    unsigned long now = millis();
+    if (lastWarnTime != 0 && now - lastWarnTime < DIAG_WARN_INTERVAL_MS) return;
+    lastWarnTime = now;
+    LOG_PRINTF("⚠️ [DIAG] %s (%lums), heap=%u\n", reason, duration, ESP.getFreeHeap());
+}
+
+/**
+ * Обновляет минимумы свободной кучи и самого большого свободного блока.
+ * Именно maxFreeBlock показывает, хватит ли памяти на очередной ответ/буфер.
+ */
+void Diagnostics::sampleHeap() {
+    uint32_t freeHeap = ESP.getFreeHeap();
+    uint32_t maxBlock = ESP.getMaxFreeBlockSize();
+    if (freeHeap < snap.minFreeHeap) snap.minFreeHeap = freeHeap;
+    if (maxBlock < snap.minMaxFreeBlock) snap.minMaxFreeBlock = maxBlock;
+}
+
+/**
+ * Отмечает начало итерации loop().
+ */
 void Diagnostics::loopStart() {
     loopStartTime = millis();
-    frameCount++;
+    if (windowStart == 0) windowStart = loopStartTime;
 }
 
+/**
+ * Завершает итерацию loop(): обновляет максимумы и раз в окно публикует снимок.
+ */
 void Diagnostics::loopEnd() {
-    unsigned long duration = millis() - loopStartTime;
-    
-    if (duration > SUSPICIOUS_LOOP_MS) {
-        logSuspicious("Loop too slow", duration);
-    }
-    
-    // Periodic stats logging
-    if (millis() - lastLogTime > LOG_INTERVAL_MS) {
-        float fps = frameCount * 1000.0 / (millis() - lastLogTime);
-        // LOG_PRINT("FPS: ");
-        // LOG_PRINTLN(String(fps));
-        
-        lastLogTime = millis();
-        frameCount = 0;
+    unsigned long now = millis();
+    uint32_t duration = now - loopStartTime;
+    loopCount++;
+    if (duration > maxLoopMs) maxLoopMs = duration;
+    if (duration > snap.maxLoopMsBoot) snap.maxLoopMsBoot = duration;
+    if (duration > SUSPICIOUS_LOOP_MS) warn("Loop too slow", duration);
+
+    sampleHeap();
+
+    // Окно закончилось — фиксируем метрики и обнуляем накопители
+    unsigned long elapsed = now - windowStart;
+    if (elapsed >= DIAG_WINDOW_MS) {
+        snap.loopsPerSec = (uint32_t)((uint64_t)loopCount * 1000 / elapsed);
+        snap.ledFps = (uint32_t)((uint64_t)ledFrames * 1000 / elapsed);
+        snap.maxLoopMsWindow = maxLoopMs;
+        snap.maxLedFrameMs = maxLedMs;
+        snap.slowestTask = worstTask ? worstTask : "";
+        snap.slowestTaskMs = worstTaskMs;
+
+        windowStart = now;
+        loopCount = 0;
+        ledFrames = 0;
+        maxLoopMs = 0;
+        maxLedMs = 0;
+        worstTask = nullptr;
+        worstTaskMs = 0;
     }
 }
 
+/**
+ * Начало измеряемой стадии цикла (без вложенности).
+ * @param name статическая строка с именем стадии
+ */
 void Diagnostics::taskStart(const char* name) {
-    if (currentTask.name != nullptr) {
-        // If a task is already running, we might be nesting or forgot to close one.
-        // For simplicity, let's just warn or handle it gracefully.
-        // But for this simple implementation, assume single-threaded, non-nested for big blocks.
-    }
-    currentTask.name = name;
-    currentTask.startTime = millis();
+    taskName = name;
+    taskStartTime = millis();
 }
 
+/**
+ * Конец текущей стадии: учитываем её длительность в «самой медленной стадии» окна.
+ */
 void Diagnostics::taskEnd() {
-    if (currentTask.name == nullptr) return;
-    
-    unsigned long duration = millis() - currentTask.startTime;
-    
-    // Detect slow tasks individually
-    if (duration > 20) { // 20ms is quite long for a single task like "WiFi" or "LEDs"
-        String msg = "Slow task: ";
-        msg += currentTask.name;
-        logSuspicious(msg.c_str(), duration);
+    if (taskName == nullptr) return;
+    uint32_t duration = millis() - taskStartTime;
+    if (duration > worstTaskMs) {
+        worstTaskMs = duration;
+        worstTask = taskName;
     }
-    
-    currentTask.name = nullptr;
+    if (duration > SUSPICIOUS_TASK_MS) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Slow task: %s", taskName);
+        warn(msg, duration);
+    }
+    taskName = nullptr;
 }
 
-void Diagnostics::logSuspicious(const char* reason, unsigned long duration) {
-    String msg = "⚠️ [DIAG] ";
-    msg += reason;
-    msg += " (";
-    msg += duration;
-    msg += "ms)";
-    LOG_PRINTLN(msg);
+/**
+ * Учитывает выведенный кадр LED.
+ * @param durationMs время расчёта эффекта + FastLED.show()
+ */
+void Diagnostics::recordLedFrame(uint32_t durationMs) {
+    ledFrames++;
+    if (durationMs > maxLedMs) maxLedMs = durationMs;
 }
 
-void Diagnostics::printStats() {
-    // Implement if we want to print accumulated stats on demand
+/**
+ * Учитывает сохранение настроек в EEPROM.
+ * @param durationMs длительность записи во флеш
+ */
+void Diagnostics::recordEepromSave(uint32_t durationMs) {
+    snap.eepromSaves++;
+    snap.lastSaveMs = durationMs;
 }

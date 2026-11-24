@@ -45,12 +45,22 @@ unsigned long lastBacklightColorSwitch = 0;
 // Отслеживание последней проверки расписания
 int lastCheckedMinute = -1;
 
+// Отложенное сохранение настроек: пишем в EEPROM только после паузы в изменениях.
+// Запись стирает и перешивает сектор флеша (десятки мс, CPU и WiFi стоят),
+// поэтому сохранять на каждое движение слайдера нельзя.
+const unsigned long SETTINGS_SAVE_DELAY_MS = 3000;
+bool settingsSavePending = false;
+unsigned long lastSettingsChangeAt = 0;
+
+// Был ли уже выведен «чёрный» кадр при выключенном питании (дальше show не нужен)
+bool powerOffFrameShown = false;
+
 // Функция синхронизации времени через HTTP API
 bool syncTimeViaHTTP() {
   WiFiClient client;
   HTTPClient http;
   
-  LOG_PRINTLN("🌐 Fetching time via HTTP API...");
+  LOG_PRINTLN(F("🌐 Fetching time via HTTP API..."));
   
   // Используем worldtimeapi.org для получения времени
   // Timezone: Asia/Yekaterinburg (UTC+5)
@@ -76,7 +86,7 @@ bool syncTimeViaHTTP() {
         timeval tv = { timestamp, 0 };
         settimeofday(&tv, nullptr);
         
-        LOG_PRINT("✅ Time synced via HTTP: ");
+        LOG_PRINT(F("✅ Time synced via HTTP: "));
         LOG_PRINTLN(String(timestamp));
         
         http.end();
@@ -84,7 +94,7 @@ bool syncTimeViaHTTP() {
       }
     }
   } else {
-    LOG_PRINT("❌ HTTP request failed: ");
+    LOG_PRINT(F("❌ HTTP request failed: "));
     LOG_PRINTLN(String(httpCode));
   }
   
@@ -94,8 +104,8 @@ bool syncTimeViaHTTP() {
 
 void setup() {
   Serial.begin(115200);
-  LOG_PRINTLN("\n\n🎄 WiFi LED Garland Starting...");
-  LOG_PRINTLN("BOOT: System Restarted");
+  LOG_PRINTLN(F("\n\n🎄 WiFi LED Garland Starting..."));
+  LOG_PRINTLN(F("BOOT: System Restarted"));
   LOG_PRINTF("Reset Reason: %s\n", ESP.getResetReason().c_str());
   
   // Инициализация LED state
@@ -106,7 +116,7 @@ void setup() {
   initLEDs();
   
   // Подключение к WiFi
-  LOG_PRINT("Connecting to WiFi: ");
+  LOG_PRINT(F("Connecting to WiFi: "));
   LOG_PRINTLN(WIFI_SSID);
   
   WiFi.mode(WIFI_STA);
@@ -118,7 +128,7 @@ void setup() {
   IPAddress subnet(SUBNET_MASK);
   
   if (!WiFi.config(local_IP, gateway, subnet)) {
-    LOG_PRINTLN("Failed to configure static IP");
+    LOG_PRINTLN(F("Failed to configure static IP"));
   }
 #endif
   
@@ -128,7 +138,7 @@ void setup() {
   int dotCount = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    LOG_PRINT(".");
+    LOG_PRINT(F("."));
     
     // Бегущий огонёк во время подключения
     FastLED.clear();
@@ -138,8 +148,8 @@ void setup() {
     
     // Таймаут 30 секунд
     if (dotCount > 60) {
-      LOG_PRINTLN("\n❌ WiFi connection failed!");
-      LOG_PRINTLN("Please check WIFI_SSID and WIFI_PASSWORD in config.h");
+      LOG_PRINTLN(F("\n❌ WiFi connection failed!"));
+      LOG_PRINTLN(F("Please check WIFI_SSID and WIFI_PASSWORD in config.h"));
       
       // Красная вспышка - ошибка
       fill_solid(leds, ledState.numLeds, CRGB::Red);
@@ -150,8 +160,8 @@ void setup() {
     }
   }
   
-  LOG_PRINTLN("\n✅ WiFi connected!");
-  LOG_PRINT("IP address: ");
+  LOG_PRINTLN(F("\n✅ WiFi connected!"));
+  LOG_PRINT(F("IP address: "));
   LOG_PRINTLN(WiFi.localIP().toString());
   
   // Зелёная вспышка - успех
@@ -162,45 +172,45 @@ void setup() {
   FastLED.show();
   
   // Инициализация NTP через встроенные функции ESP8266
-  LOG_PRINTLN("🕐 Initializing NTP...");
-  LOG_PRINT("NTP Server: ");
+  LOG_PRINTLN(F("🕐 Initializing NTP..."));
+  LOG_PRINT(F("NTP Server: "));
   LOG_PRINTLN(NTP_SERVER);
-  LOG_PRINT("Timezone: UTC+");
+  LOG_PRINT(F("Timezone: UTC+"));
   LOG_PRINTLN(String(NTP_OFFSET / 3600));
   
   // Настраиваем NTP (сервер, смещение в секундах, летнее время = 0)
   configTime(NTP_OFFSET, 0, NTP_SERVER);
   
   // Ждем синхронизации времени
-  LOG_PRINT("Waiting for NTP sync");
+  LOG_PRINT(F("Waiting for NTP sync"));
   int ntpRetries = 0;
   time_t now = time(nullptr);
   
   while (now < 1000000000 && ntpRetries < 10) {  // Уменьшили попытки NTP
     delay(500);
-    LOG_PRINT(".");
+    LOG_PRINT(F("."));
     now = time(nullptr);
     ntpRetries++;
   }
   
   if (now >= 1000000000) {
-    LOG_PRINTLN("\n✅ NTP time synchronized");
+    LOG_PRINTLN(F("\n✅ NTP time synchronized"));
     struct tm timeinfo;
     localtime_r(&now, &timeinfo);
-    LOG_PRINT("Current time: ");
+    LOG_PRINT(F("Current time: "));
     LOG_PRINTLN(String(asctime(&timeinfo)));
   } else {
-    LOG_PRINTLN("\n⚠️ NTP sync failed, trying HTTP API...");
+    LOG_PRINTLN(F("\n⚠️ NTP sync failed, trying HTTP API..."));
     
     // Пробуем синхронизацию через HTTP
     if (syncTimeViaHTTP()) {
       now = time(nullptr);
       struct tm timeinfo;
       localtime_r(&now, &timeinfo);
-      LOG_PRINT("Current time: ");
+      LOG_PRINT(F("Current time: "));
       LOG_PRINTLN(String(asctime(&timeinfo)));
     } else {
-      LOG_PRINTLN("⚠️ HTTP sync also failed, time will be set from browser");
+      LOG_PRINTLN(F("⚠️ HTTP sync also failed, time will be set from browser"));
     }
   }
   
@@ -221,7 +231,7 @@ void setup() {
   });
   
   ArduinoOTA.onEnd([]() {
-    LOG_PRINTLN("\nEnd");
+    LOG_PRINTLN(F("\nEnd"));
   });
   
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
@@ -230,23 +240,23 @@ void setup() {
   
   ArduinoOTA.onError([](ota_error_t error) {
     LOG_PRINTF("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) LOG_PRINTLN("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) LOG_PRINTLN("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) LOG_PRINTLN("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) LOG_PRINTLN("Receive Failed");
-    else if (error == OTA_END_ERROR) LOG_PRINTLN("End Failed");
+    if (error == OTA_AUTH_ERROR) LOG_PRINTLN(F("Auth Failed"));
+    else if (error == OTA_BEGIN_ERROR) LOG_PRINTLN(F("Begin Failed"));
+    else if (error == OTA_CONNECT_ERROR) LOG_PRINTLN(F("Connect Failed"));
+    else if (error == OTA_RECEIVE_ERROR) LOG_PRINTLN(F("Receive Failed"));
+    else if (error == OTA_END_ERROR) LOG_PRINTLN(F("End Failed"));
   });
   
   ArduinoOTA.begin();
-  LOG_PRINTLN("✅ OTA Ready");
+  LOG_PRINTLN(F("✅ OTA Ready"));
   
   // Запуск веб-сервера
   setupWebServer();
   
-  LOG_PRINTLN("\n🌐 Web server started");
-  LOG_PRINT("Open http://");
+  LOG_PRINTLN(F("\n🌐 Web server started"));
+  LOG_PRINT(F("Open http://"));
   LOG_PRINT(WiFi.localIP().toString());
-  LOG_PRINTLN("/ in your browser\n");
+  LOG_PRINTLN(F("/ in your browser\n"));
   
   lastModeSwitch = millis();
   lastBacklightModeSwitch = millis();
@@ -303,11 +313,11 @@ void checkSchedules() {
     ledState.power = schedule.action;
     settingsChanged = true;
     
-    LOG_PRINT("⏰ Schedule triggered: ");
+    LOG_PRINT(F("⏰ Schedule triggered: "));
     LOG_PRINT(schedule.action ? "ON" : "OFF");
-    LOG_PRINT(" at ");
+    LOG_PRINT(F(" at "));
     LOG_PRINT(String(currentHour));
-    LOG_PRINT(":");
+    LOG_PRINT(F(":"));
     LOG_PRINTLN(String(currentMinute));
   }
 }
@@ -330,7 +340,7 @@ void loop() {
     time_t now = time(nullptr);
     if (now < 1000000000) {
       // Время не синхронизировано, пробуем снова
-      LOG_PRINTLN("⏰ Time not synced, attempting HTTP sync...");
+      LOG_PRINTLN(F("⏰ Time not synced, attempting HTTP sync..."));
       syncTimeViaHTTP();
     }
   }
@@ -348,6 +358,10 @@ void loop() {
   // Запуск текущего режима LED
   EVERY_N_MILLISECONDS(20) {
     diag.taskStart("LEDs");
+    unsigned long frameStart = millis();
+
+    // Длина вывода = реальное число LED (меняется через /api/leds)
+    syncLedCount();
     
     // Check if time is synchronized (year > 2001) or if we don't need to wait
     if (!WAIT_FOR_TIME_SYNC || time(nullptr) > 1000000000) {
@@ -363,8 +377,16 @@ void loop() {
       fill_solid(leds, ledState.numLeds, CRGB::Green);
     }
     
-    // Show the frame
-    FastLED.show();
+    // Выводим кадр. При выключенном питании достаточно одного чёрного кадра —
+    // дальше не тратим CPU на вывод, который ничего не меняет.
+    if (ledState.power) {
+      powerOffFrameShown = false;
+      FastLED.show();
+      diag.recordLedFrame(millis() - frameStart);
+    } else if (!powerOffFrameShown) {
+      FastLED.show();
+      powerOffFrameShown = true;
+    }
     diag.taskEnd();
   }
   
@@ -522,12 +544,22 @@ void loop() {
     }
   }
   
-  // Сохранение настроек в главном цикле (безопасно для EEPROM)
+  // Отложенное сохранение настроек (debounce): каждое изменение из веба
+  // сдвигает момент записи, во флеш пишем один раз после паузы
   if (settingsChanged) {
-    LOG_PRINTLN("💾 Settings changed, saving to EEPROM...");
-    saveLEDState();
     settingsChanged = false;
-    LOG_PRINTLN("✅ Settings saved");
+    settingsSavePending = true;
+    lastSettingsChangeAt = millis();
+  }
+  if (settingsSavePending && millis() - lastSettingsChangeAt >= SETTINGS_SAVE_DELAY_MS) {
+    settingsSavePending = false;
+    diag.taskStart("EEPROM");
+    unsigned long saveStart = millis();
+    saveLEDState();
+    unsigned long saveMs = millis() - saveStart;
+    diag.taskEnd();
+    diag.recordEepromSave(saveMs);
+    LOG_PRINTF("💾 Settings saved (%lums)\n", saveMs);
   }
 
   diag.loopEnd();

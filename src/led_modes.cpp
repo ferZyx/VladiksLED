@@ -4,17 +4,47 @@
 
 CRGB leds[MAX_LEDS];
 
+// Сколько светодиодов сейчас реально отправляется в ленту при FastLED.show()
+static uint16_t appliedLedCount = MAX_LEDS;
+
+/**
+ * Регистрирует ленту в FastLED и гасит её.
+ * Контроллер создаётся на MAX_LEDS, затем длина вывода сужается до ledState.numLeds.
+ */
 void initLEDs() {
   FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, MAX_LEDS);
   FastLED.setBrightness(ledState.brightness);
   FastLED.clear();
   FastLED.show();
+  appliedLedCount = MAX_LEDS;
+  syncLedCount();
+}
+
+/**
+ * Синхронизирует длину вывода FastLED с ledState.numLeds.
+ *
+ * Зачем: вывод WS2812 занимает ~30 мкс на светодиод и блокирует CPU.
+ * Отправка всех MAX_LEDS (300 = ~9 мс) каждые 20 мс отнимала почти половину
+ * процессорного времени у WiFi/TCP-стека, отсюда лаги веба.
+ */
+void syncLedCount() {
+  uint16_t target = constrain(ledState.numLeds, (uint16_t)1, (uint16_t)MAX_LEDS);
+  if (target == appliedLedCount) return;
+
+  // При уменьшении один раз гасим «хвост» со старой длиной, иначе он
+  // так и останется гореть последним показанным цветом
+  if (target < appliedLedCount) {
+    fill_solid(leds + target, appliedLedCount - target, CRGB::Black);
+    FastLED.show();
+  }
+  FastLED[0].setLeds(leds, target);
+  appliedLedCount = target;
 }
 
 void runMode(uint8_t mode) {
   if (!ledState.power) {
-    FastLED.clear();
-    FastLED.show();
+    // Только гасим буфер; вывод кадра централизован в main.cpp
+    fill_solid(leds, ledState.numLeds, CRGB::Black);
     return;
   }
   
@@ -721,8 +751,8 @@ CRGB getBacklightColor() {
 // Запуск режима подсветки
 void runBacklightMode(uint8_t mode) {
   if (!ledState.power) {
-    FastLED.clear();
-    FastLED.show();
+    // Только гасим буфер; вывод кадра централизован в main.cpp
+    fill_solid(leds, ledState.numLeds, CRGB::Black);
     return;
   }
   
