@@ -49,6 +49,28 @@ void initBacklightDefaults() {
   }
 }
 
+/**
+ * Значения по умолчанию для общих настроек анимации (поля EEPROM v5).
+ */
+void initAnimationDefaults() {
+  ledState.garlandSpeed = ANIM_SPEED_DEFAULT;
+  ledState.backlightSpeed = ANIM_SPEED_DEFAULT;
+  ledState.garlandSmoothing = GARLAND_SMOOTHING_DEFAULT;
+}
+
+/**
+ * Приводит загруженные из EEPROM настройки анимации к допустимому диапазону
+ * (защита от мусора во флеше).
+ */
+static void sanitizeAnimationSettings() {
+  if (ledState.garlandSpeed < ANIM_SPEED_MIN || ledState.garlandSpeed > ANIM_SPEED_MAX) {
+    ledState.garlandSpeed = ANIM_SPEED_DEFAULT;
+  }
+  if (ledState.backlightSpeed < ANIM_SPEED_MIN || ledState.backlightSpeed > ANIM_SPEED_MAX) {
+    ledState.backlightSpeed = ANIM_SPEED_DEFAULT;
+  }
+}
+
 void initLEDState() {
   ledState.power = true;
   ledState.brightness = DEFAULT_BRIGHTNESS;
@@ -79,6 +101,7 @@ void initLEDState() {
   
   // Инициализация настроек подсветки
   initBacklightDefaults();
+  initAnimationDefaults();
 }
 
 void saveLEDState() {
@@ -112,7 +135,18 @@ void loadLEDState() {
     if (header.version == EEPROM_VERSION) {
       // Данные валидны - загружаем состояние
       EEPROM.get(sizeof(EEPROMHeader), ledState);
+      sanitizeAnimationSettings();
       Serial.println("✅ LED state loaded from EEPROM");
+    } else if (header.version == 4) {
+      // Миграция v4 -> v5: новые поля дописаны в конец LEDState, префикс совпадает.
+      // Читаем всю структуру (хвост — мусор) и задаём новым полям значения по умолчанию.
+      Serial.println("🔄 Migrating EEPROM from v4 to v5...");
+      EEPROM.get(sizeof(EEPROMHeader), ledState);
+      initAnimationDefaults();
+      EEPROM.end();
+      saveLEDState();
+      Serial.println("✅ Migration v4->v5 complete");
+      return;
     } else if (header.version == 3) {
       // Миграция с версии 3 на версию 4 (добавление подсветки)
       Serial.println("🔄 Migrating EEPROM from v3 to v4...");
@@ -123,10 +157,11 @@ void loadLEDState() {
       // Инициализируем новые поля (подсветка)
       ledState.operationMode = MODE_GARLAND;
       initBacklightDefaults();
+      initAnimationDefaults();
       
       EEPROM.end();
       saveLEDState();  // Сохраняем с новой версией
-      Serial.println("✅ Migration v3->v4 complete");
+      Serial.println("✅ Migration v3->v5 complete");
       return;
     } else if (header.version == 1) {
       // Миграция с версии 1 на версию 4
@@ -147,10 +182,11 @@ void loadLEDState() {
       // Инициализируем подсветку
       ledState.operationMode = MODE_GARLAND;
       initBacklightDefaults();
+      initAnimationDefaults();
       
       EEPROM.end();
       saveLEDState();  // Сохраняем с новой версией
-      Serial.println("✅ Migration v1->v4 complete");
+      Serial.println("✅ Migration v1->v5 complete");
       return;
     } else {
       // Неизвестная версия

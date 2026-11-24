@@ -194,6 +194,15 @@ details.more summary::-webkit-details-marker{display:none}
     </div>
 
     <div class="card">
+      <h2>Анимация <span class="muted">для всех режимов</span></h2>
+      <div class="slider-head"><span>Скорость</span><b id="garlandSpeedVal">×1.0</b></div>
+      <input type="range" id="garlandSpeed" min="10" max="250" step="5" value="100" oninput="updateAnimation()">
+      <div class="slider-head" style="margin-top:12px"><span>Плавность</span><b id="garlandSmoothingVal">—</b></div>
+      <input type="range" id="garlandSmoothing" min="0" max="255" value="120" oninput="updateAnimation()">
+      <div class="muted" style="margin-top:6px">Чем выше, тем мягче загораются и гаснут огоньки</div>
+    </div>
+
+    <div class="card">
       <h2>Авто-переключение</h2>
       <div class="row">
         <span class="grow">Каждые, сек <span class="muted">(0 — выкл)</span></span>
@@ -217,6 +226,8 @@ details.more summary::-webkit-details-marker{display:none}
     <div class="card">
       <h2>Анимация</h2>
       <div id="backlightModesGrid" class="grid"></div>
+      <div class="slider-head" style="margin-top:14px"><span>Общая скорость</span><b id="backlightSpeedVal">×1.0</b></div>
+      <input type="range" id="backlightSpeed" min="10" max="250" step="5" value="100" oninput="updateAnimation()">
     </div>
 
     <div class="card">
@@ -879,6 +890,38 @@ async function saveSettings() {
     await apiCall('/api/auto-switch', { delay: delay, random: $('randomOrder').checked });
 }
 
+// ===== Общие настройки анимации =====
+let animationDebounceTimer = null;
+
+/**
+ * Подписи к слайдерам скорости и плавности.
+ */
+function renderAnimationLabels() {
+    // 100 -> ×1.0, 125 -> ×1.25, 50 -> ×0.5
+    const fmt = v => { const n = Number((v / 100).toFixed(2)); return '×' + (n % 1 === 0 ? n.toFixed(1) : String(n)); };
+    $('garlandSpeedVal').textContent = fmt(parseInt($('garlandSpeed').value));
+    $('backlightSpeedVal').textContent = fmt(parseInt($('backlightSpeed').value));
+    const sm = parseInt($('garlandSmoothing').value);
+    $('garlandSmoothingVal').textContent = sm === 0 ? 'выкл' : Math.round(sm / 2.55) + '%';
+}
+
+/**
+ * Изменение скорости/плавности: подписи сразу, запрос — с задержкой.
+ * Отправляем все три значения разом, поэтому склейка запросов в очереди безопасна.
+ */
+function updateAnimation() {
+    markUserAction();
+    renderAnimationLabels();
+    clearTimeout(animationDebounceTimer);
+    animationDebounceTimer = setTimeout(() => {
+        apiCall('/api/animation', {
+            garlandSpeed: parseInt($('garlandSpeed').value),
+            backlightSpeed: parseInt($('backlightSpeed').value),
+            garlandSmoothing: parseInt($('garlandSmoothing').value)
+        });
+    }, 150);
+}
+
 // ===== Загрузка состояния и опрос =====
 
 /**
@@ -899,6 +942,12 @@ async function loadState(includeBacklight = true) {
             updateOperationModeUI();
         }
         updateBrightnessUI(state.brightness);
+        if (state.garlandSpeed !== undefined) {
+            setIfIdle($('garlandSpeed'), state.garlandSpeed);
+            setIfIdle($('backlightSpeed'), state.backlightSpeed);
+            setIfIdle($('garlandSmoothing'), state.garlandSmoothing);
+            renderAnimationLabels();
+        }
 
         // Полная перерисовка сетки — только если поменялся состав архива
         const signature = (state.modeSettings || []).map(m => m.archived ? 1 : 0).join('');

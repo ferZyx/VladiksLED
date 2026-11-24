@@ -12,7 +12,15 @@ struct EEPROMHeader {
 };
 
 #define EEPROM_MAGIC 0x4C454456  // "LEDV" in hex
-#define EEPROM_VERSION 4
+#define EEPROM_VERSION 5
+// v5: в конец LEDState добавлены общая скорость анимаций и плавность гирлянды
+
+// Диапазон общей скорости анимаций, в процентах от «родной» скорости режимов
+#define ANIM_SPEED_MIN 10
+#define ANIM_SPEED_MAX 250
+#define ANIM_SPEED_DEFAULT 100
+// Плавность гирлянды по умолчанию (0 = выкл, 255 = максимально плавно)
+#define GARLAND_SMOOTHING_DEFAULT 120
 
 // Режим работы устройства
 enum OperationMode : uint8_t {
@@ -81,6 +89,12 @@ struct LEDState {
   // Новые поля для подсветки
   OperationMode operationMode;    // Режим работы: гирлянда или подсветка
   BacklightSettings backlight;    // Настройки подсветки
+
+  // v5: общие настройки анимации (новые поля — только в конец структуры,
+  // чтобы при миграции префикс из EEPROM v4 читался без сдвига)
+  uint8_t garlandSpeed;           // Общая скорость режимов гирлянды, % (ANIM_SPEED_MIN..MAX)
+  uint8_t backlightSpeed;         // Общая скорость анимаций подсветки, %
+  uint8_t garlandSmoothing;       // Плавность гирлянды: 0 = выкл, 255 = максимум
 };
 
 // Глобальная переменная состояния
@@ -89,6 +103,7 @@ extern volatile bool settingsChanged;
 
 // Функции для работы с состоянием
 void initLEDState();
+void initAnimationDefaults();
 void saveLEDState();
 void loadLEDState();
 

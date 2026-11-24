@@ -56,4 +56,7 @@ void handleSetBacklightColor(AsyncWebServerRequest *request, uint8_t *data, size
 void handleDeleteBacklightColor(AsyncWebServerRequest *request);
 void handleSetBacklightAutoSwitch(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
 
+// Общие настройки анимации: скорость гирлянды/подсветки и плавность гирлянды
+void handleSetAnimation(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total);
+
 #endif

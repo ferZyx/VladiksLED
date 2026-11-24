@@ -403,6 +403,10 @@ void loop() {
 
     // Длина вывода = реальное число LED (меняется через /api/leds)
     syncLedCount();
+
+    // Виртуальные часы анимации: общая скорость своя у гирлянды и у подсветки
+    advanceAnimationClock(ledState.operationMode == MODE_GARLAND
+                            ? ledState.garlandSpeed : ledState.backlightSpeed);
     
     // Check if time is synchronized (year > 2001) or if we don't need to wait
     if (!WAIT_FOR_TIME_SYNC || time(nullptr) > 1000000000) {
@@ -415,18 +419,20 @@ void loop() {
     } else {
       // Time not synced yet - show solid green to indicate waiting state
       // This matches the "success connection" color, keeping it until we get time
-      fill_solid(leds, ledState.numLeds, CRGB::Green);
+      fillFrameSolid(CRGB::Green);
     }
     
-    // Выводим кадр. При выключенном питании достаточно одного чёрного кадра —
-    // дальше не тратим CPU на вывод, который ничего не меняет.
+    // Переносим кадр в выходной буфер со сглаживанием (плавное зажигание/угасание,
+    // кроссфейд при смене режима). При выключенном питании показываем кадры,
+    // пока лента плавно гаснет, затем перестаём тратить CPU на вывод.
+    bool outputChanged = presentFrame();
     if (ledState.power) {
       powerOffFrameShown = false;
       FastLED.show();
       diag.recordLedFrame(millis() - frameStart);
-    } else if (!powerOffFrameShown) {
+    } else if (outputChanged || !powerOffFrameShown) {
       FastLED.show();
-      powerOffFrameShown = true;
+      powerOffFrameShown = !outputChanged;
     }
     diag.taskEnd();
   }

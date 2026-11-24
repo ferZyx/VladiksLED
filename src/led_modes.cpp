@@ -2,7 +2,12 @@
 #include "led_state.h"
 #include <math.h>
 
-CRGB leds[MAX_LEDS];
+CRGB leds[MAX_LEDS];   // выходной буфер: именно он уходит в ленту (FastLED.show)
+static CRGB frame[MAX_LEDS];  // буфер, в который рисуют эффекты (цель для сглаживания)
+
+// Аккумуляторы сглаживания в формате 8.8 (по каналу на светодиод): дробная часть
+// нужна, чтобы плавное приближение к цели не «залипало» на единицу от неё
+static uint16_t smoothAcc[MAX_LEDS * 3];
 
 // Сколько светодиодов сейчас реально отправляется в ленту при FastLED.show()
 static uint16_t appliedLedCount = MAX_LEDS;
@@ -14,6 +19,9 @@ static uint16_t appliedLedCount = MAX_LEDS;
 void initLEDs() {
   FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, MAX_LEDS);
   FastLED.setBrightness(ledState.brightness);
+  // Временной дизеринг FastLED при яркости < 255 даёт заметное мерцание
+  // на тусклых участках (особенно у медленных эффектов) — отключаем
+  FastLED.setDither(DISABLE_DITHER);
   FastLED.clear();
   FastLED.show();
   appliedLedCount = MAX_LEDS;
@@ -35,16 +43,177 @@ void syncLedCount() {
   // так и останется гореть последним показанным цветом
   if (target < appliedLedCount) {
     fill_solid(leds + target, appliedLedCount - target, CRGB::Black);
+    fill_solid(frame + target, appliedLedCount - target, CRGB::Black);
+    memset(smoothAcc + target * 3, 0, (appliedLedCount - target) * 3 * sizeof(uint16_t));
     FastLED.show();
   }
   FastLED[0].setLeds(leds, target);
   appliedLedCount = target;
 }
 
+// =====================================================
+// ===== ВИРТУАЛЬНЫЕ ЧАСЫ АНИМАЦИИ (общая скорость) =====
+// =====================================================
+// Все эффекты берут время не из millis(), а из animMillis(): эти часы идут
+// быстрее или медленнее реальных в зависимости от общей скорости режима работы.
+// beatsin8/beatsin16 из FastLED читают fl::millis() напрямую, поэтому им
+// передаётся timebase = millis() - animMillis(): тогда (millis - timebase) = animMillis.
+
+static uint32_t animTimeMs = 0;      // текущее виртуальное время, мс
+static float animFraction = 0.0f;    // дробный остаток виртуальных мс
+static uint32_t animLastRealMs = 0;  // реальное время прошлого шага
+static uint32_t animDeltaMs = 0;     // сколько виртуальных мс прошло за этот кадр
+static uint32_t animFrameRealMs = 0; // millis() на начало кадра (для стабильного timebase)
+
+// Эталонный кадр, под который исторически подбирались «шаги на кадр» в эффектах
+static const float ANIM_REFERENCE_FRAME_MS = 20.0f;
+
+/**
+ * Продвигает виртуальные часы анимации. Вызывается один раз за кадр до эффекта.
+ * @param speedPercent общая скорость в процентах (100 = родная скорость эффектов)
+ */
+void advanceAnimationClock(uint8_t speedPercent) {
+  uint32_t now = millis();
+  if (animLastRealMs == 0) animLastRealMs = now;
+  uint32_t realDt = now - animLastRealMs;
+  animLastRealMs = now;
+  // После долгой паузы (OTA, запись EEPROM) не прыгаем вперёд рывком
+  if (realDt > 100) realDt = 100;
+
+  animFraction += realDt * (speedPercent / 100.0f);
+  animDeltaMs = (uint32_t)animFraction;
+  animFraction -= animDeltaMs;
+  animTimeMs += animDeltaMs;
+  animFrameRealMs = now;
+}
+
+/**
+ * Виртуальное время анимации, мс.
+ * @return время с учётом общей скорости
+ */
+static inline uint32_t animMillis() {
+  return animTimeMs;
+}
+
+/**
+ * timebase для beatsin8/beatsin16, чтобы они шли по виртуальным часам.
+ * @return значение timebase
+ */
+static inline uint32_t animTimebase() {
+  return animFrameRealMs - animTimeMs;
+}
+
+/**
+ * Накопитель «шагов на кадр»: переводит величину, рассчитанную на эталонный
+ * кадр 20 мс, в целое число шагов за реально прошедшее виртуальное время.
+ * @param acc       дробный накопитель (static в эффекте)
+ * @param perFrame  сколько единиц добавлялось за эталонный кадр
+ * @return целое число единиц для этого кадра
+ */
+static uint32_t animSteps(float& acc, float perFrame) {
+  acc += perFrame * (animDeltaMs / ANIM_REFERENCE_FRAME_MS);
+  uint32_t whole = (uint32_t)acc;
+  acc -= whole;
+  return whole;
+}
+
+// =====================================================
+// ===== СГЛАЖИВАНИЕ ВЫВОДА (плавное зажигание/угасание) =====
+// =====================================================
+// Каждый светодиод не прыгает к новому цвету, а экспоненциально к нему
+// приближается. Это убирает мерцание от резких вспышек/провалов в эффектах
+// и даёт мягкие переходы при смене режима и вкл/выкл питания.
+
+// Постоянная времени при смене режима и вкл/выкл (мс) и сколько длится кроссфейд
+static const float CROSSFADE_TAU_MS = 280.0f;
+static const uint32_t CROSSFADE_DURATION_MS = 900;
+// Минимальная постоянная времени для подсветки (у неё свои плавные переходы цвета)
+static const float BACKLIGHT_TAU_MS = 40.0f;
+
+/**
+ * Переводит постоянную времени в коэффициент приближения за кадр (0..65535).
+ * @param tauMs   постоянная времени, мс (0 = без сглаживания)
+ * @param frameMs длительность кадра, мс
+ * @return коэффициент в формате 0.16
+ */
+static uint32_t smoothingCoef(float tauMs, float frameMs) {
+  if (tauMs <= 1.0f) return 65535;
+  float k = 1.0f - expf(-frameMs / tauMs);
+  if (k >= 1.0f) return 65535;
+  return (uint32_t)(k * 65535.0f) + 1;
+}
+
+/**
+ * Переносит кадр эффекта (frame) в выходной буфер (leds) со сглаживанием.
+ * @return true, если выходной буфер изменился (кадр стоит показать)
+ */
+bool presentFrame() {
+  static uint32_t lastPresentMs = 0;
+  static uint32_t crossfadeUntil = 0;
+  static int16_t lastSignature = -1;
+
+  uint32_t now = millis();
+  float frameMs = lastPresentMs == 0 ? ANIM_REFERENCE_FRAME_MS : (float)(now - lastPresentMs);
+  if (frameMs > 100.0f) frameMs = 100.0f;
+  lastPresentMs = now;
+
+  // Смена режима / режима работы / питания — включаем мягкий кроссфейд
+  int16_t signature = (ledState.power ? 0x4000 : 0) |
+                      ((ledState.operationMode == MODE_GARLAND) ? 0x2000 : 0) |
+                      (ledState.operationMode == MODE_GARLAND ? ledState.currentMode : ledState.backlight.currentMode);
+  if (lastSignature >= 0 && signature != lastSignature) {
+    crossfadeUntil = now + CROSSFADE_DURATION_MS;
+  }
+  lastSignature = signature;
+
+  float tau;
+  if (ledState.operationMode == MODE_GARLAND) {
+    // 0..255 -> 0..~300 мс: чем больше, тем мягче загораются и гаснут пиксели
+    tau = ledState.garlandSmoothing * 1.2f;
+  } else {
+    tau = BACKLIGHT_TAU_MS;
+  }
+  if ((int32_t)(crossfadeUntil - now) > 0 && tau < CROSSFADE_TAU_MS) {
+    tau = CROSSFADE_TAU_MS;
+  }
+  uint32_t k = smoothingCoef(tau, frameMs);
+
+  bool changed = false;
+  uint16_t count = ledState.numLeds;
+  uint8_t* target = (uint8_t*)frame;
+  uint8_t* out = (uint8_t*)leds;
+  for (uint16_t i = 0; i < count * 3; i++) {
+    int32_t goal = (int32_t)target[i] << 8;
+    int32_t acc = smoothAcc[i];
+    if (k >= 65535) {
+      acc = goal;
+    } else {
+      acc += (int32_t)(((int64_t)(goal - acc) * (int64_t)k) >> 16);
+      // Добиваем остаток, чтобы не зависать в дробной окрестности цели
+      if (acc != goal && abs(goal - acc) < 64) acc = goal;
+    }
+    smoothAcc[i] = (uint16_t)acc;
+    uint8_t value = (uint8_t)((acc + 128) >> 8);
+    if (out[i] != value) {
+      out[i] = value;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Заливает буфер кадра одним цветом (служебные индикаторы в main.cpp).
+ * @param color цвет
+ */
+void fillFrameSolid(const CRGB& color) {
+  fill_solid(frame, ledState.numLeds, color);
+}
+
 void runMode(uint8_t mode) {
   if (!ledState.power) {
     // Только гасим буфер; вывод кадра централизован в main.cpp
-    fill_solid(leds, ledState.numLeds, CRGB::Black);
+    fill_solid(frame, ledState.numLeds, CRGB::Black);
     return;
   }
   
@@ -72,13 +241,13 @@ void runMode(uint8_t mode) {
 void mode_rainbow_beat() {
   uint8_t speed = ledState.modeSettings[ledState.currentMode].speed;
   uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
-  uint8_t beat = beatsin8(speed / 10, 64, 255);
+  uint8_t beat = beatsin8(speed / 10, 64, 255, animTimebase());
   
   // Scale controls color spacing (1-10)
   uint8_t colorSpacing = map(scale, 0, 255, 1, 10);
   
   for (int i = 0; i < ledState.numLeds; i++) {
-    leds[i] = ColorFromPalette(RainbowColors_p, (i * colorSpacing) + beat, beat);
+    frame[i] = ColorFromPalette(RainbowColors_p, (i * colorSpacing) + beat, beat);
   }
 }
 
@@ -91,8 +260,8 @@ void mode_blendwave() {
   uint8_t waveDensity = map(scale, 0, 255, 5, 50);
   
   for (int i = 0; i < ledState.numLeds; i++) {
-    uint8_t bright = beatsin8(speed / 10, 0, 255, 0, i * waveDensity);
-    leds[i] = CHSV((millis() / 20) + i * 5, 255, bright);
+    uint8_t bright = beatsin8(speed / 10, 0, 255, animTimebase(), i * waveDensity);
+    frame[i] = CHSV((animMillis() / 20) + i * 5, 255, bright);
   }
 }
 
@@ -100,18 +269,18 @@ void mode_blendwave() {
 void mode_two_sin() {
   uint8_t speed = ledState.modeSettings[ledState.currentMode].speed;
   uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
-  static uint8_t hue = 0;
-  hue++;
+  // Оттенок сдвигается на 1 за эталонный кадр 20 мс (по виртуальным часам)
+  uint8_t hue = animMillis() / 20;
   
   // Scale controls wave frequency (2-20)
   uint8_t waveFreq = map(scale, 0, 255, 2, 20);
   
   for (int i = 0; i < ledState.numLeds; i++) {
-    uint8_t bright1 = beatsin8(speed / 15, 0, 255, 0, i * waveFreq);
-    uint8_t bright2 = beatsin8(speed / 20, 0, 255, 0, i * (waveFreq + 2) + 128);
+    uint8_t bright1 = beatsin8(speed / 15, 0, 255, animTimebase(), i * waveFreq);
+    uint8_t bright2 = beatsin8(speed / 20, 0, 255, animTimebase(), i * (waveFreq + 2) + 128);
     uint8_t bright = (bright1 + bright2) / 2;
     
-    leds[i] = CHSV(hue + i * 3, 255, bright);
+    frame[i] = CHSV(hue + i * 3, 255, bright);
   }
 }
 
@@ -122,19 +291,23 @@ void mode_confetti() {
   
   // Speed controls fade rate (1-30)
   uint8_t fadeAmount = map(speed, 0, 255, 1, 30);
-  fadeToBlackBy(leds, ledState.numLeds, fadeAmount);
-  
   // Scale controls number of confetti particles (1-8)
   uint8_t numConfetti = map(scale, 0, 255, 1, 8);
-  
   // Speed also affects spawn probability
   uint8_t spawnChance = map(speed, 0, 255, 50, 255);
-  
-  for (uint8_t i = 0; i < numConfetti; i++) {
-    if (random8() < spawnChance) {
-      int pos = random16(ledState.numLeds);
-      // Use direct assignment to prevent brightness overflow flashes
-      leds[pos] = CHSV(random8(), 200, 255);
+
+  // Один «тик» симуляции = эталонный кадр; число тиков зависит от общей скорости
+  static float tickAcc = 0;
+  uint32_t ticks = animSteps(tickAcc, 1.0f);
+  if (ticks > 5) ticks = 5;
+  while (ticks--) {
+    fadeToBlackBy(frame, ledState.numLeds, fadeAmount);
+    for (uint8_t i = 0; i < numConfetti; i++) {
+      if (random8() < spawnChance) {
+        int pos = random16(ledState.numLeds);
+        // Use direct assignment to prevent brightness overflow flashes
+        frame[pos] = CHSV(random8(), 200, 255);
+      }
     }
   }
 }
@@ -150,12 +323,12 @@ void mode_fire() {
   // Speed controls update rate (delay between frames: 10-100ms)
   uint8_t updateDelay = map(speed, 0, 255, 100, 10);
   
-  unsigned long now = millis();
+  unsigned long now = animMillis();  // виртуальные часы (общая скорость)
   if (now - lastUpdate < updateDelay) {
     // Just redraw without updating heat
     for (int j = 0; j < ledState.numLeds; j++) {
       CRGB color = HeatColor(heat[j]);
-      leds[j] = color;
+      frame[j] = color;
     }
     return;
   }
@@ -184,7 +357,7 @@ void mode_fire() {
   // Отображение
   for (int j = 0; j < ledState.numLeds; j++) {
     CRGB color = HeatColor(heat[j]);
-    leds[j] = color;
+    frame[j] = color;
   }
 }
 
@@ -192,26 +365,27 @@ void mode_fire() {
 void mode_rainbow_march() {
   uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
   static uint8_t hue = 0;
-  hue += ledState.modeSettings[ledState.currentMode].speed / 50;
+  static float hueAcc = 0;
+  hue += animSteps(hueAcc, ledState.modeSettings[ledState.currentMode].speed / 50);
   
   // Scale controls color spacing (1-20)
   uint8_t colorSpacing = map(scale, 0, 255, 1, 20);
   
-  fill_rainbow(leds, ledState.numLeds, hue, colorSpacing);
+  fill_rainbow(frame, ledState.numLeds, hue, colorSpacing);
 }
 
 // Plasma - плазма
 void mode_plasma() {
   uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
-  static uint8_t offset = 0;
-  offset++;
+  // 16-бит: у 8-битного счётчика шум «прыгал» при переполнении каждые ~5 с
+  uint16_t offset = animMillis() / 20;
   
   // Scale controls noise scale (10-100)
   uint8_t noiseScale = map(scale, 0, 255, 10, 100);
   
   for (int i = 0; i < ledState.numLeds; i++) {
-    uint8_t bright = inoise8(i * noiseScale, offset * 3);
-    leds[i] = CHSV((i * 7) + offset, 255, bright);
+    uint8_t bright = inoise8(i * noiseScale, (uint16_t)(offset * 3));
+    frame[i] = CHSV((i * 7) + (uint8_t)offset, 255, bright);
   }
 }
 
@@ -219,14 +393,15 @@ void mode_plasma() {
 void mode_noise() {
   uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
   static uint16_t x = 0;
-  x += ledState.modeSettings[ledState.currentMode].speed;
+  static float xAcc = 0;
+  x += animSteps(xAcc, ledState.modeSettings[ledState.currentMode].speed);
   
   // Scale controls noise density (50-300)
   uint16_t noiseDensity = map(scale, 0, 255, 50, 300);
   
   for (int i = 0; i < ledState.numLeds; i++) {
     uint8_t bright = inoise8(x + i * noiseDensity);
-    leds[i] = CHSV((i * 8) + (x / 100), 255, bright);
+    frame[i] = CHSV((i * 8) + (x / 100), 255, bright);
   }
 }
 
@@ -235,7 +410,10 @@ void mode_juggle() {
   uint8_t speed = ledState.modeSettings[ledState.currentMode].speed;
   uint8_t scale = ledState.modeSettings[ledState.currentMode].scale;
   
-  fadeToBlackBy(leds, ledState.numLeds, 20);
+  // Затухание «хвостов» — 20 за эталонный кадр, масштабируется общей скоростью
+  static float fadeAcc = 0;
+  uint32_t fade = animSteps(fadeAcc, 20.0f);
+  if (fade > 0) fadeToBlackBy(frame, ledState.numLeds, fade > 255 ? 255 : fade);
   
   // Scale controls number of juggling dots (1-16)
   uint8_t numDots = map(scale, 0, 255, 1, 16);
@@ -244,7 +422,7 @@ void mode_juggle() {
   for (int i = 0; i < numDots; i++) {
     // Speed controls BPM (beats per minute: 10-60)
     uint8_t bpm = map(speed, 0, 255, 10, 60);
-    leds[beatsin16(bpm + i * 2, 0, ledState.numLeds - 1)] |= CHSV(dothue, 200, 255);
+    frame[beatsin16(bpm + i * 2, 0, ledState.numLeds - 1, animTimebase())] |= CHSV(dothue, 200, 255);
     dothue += (256 / numDots);  // Distribute colors evenly
   }
 }
@@ -252,7 +430,7 @@ void mode_juggle() {
 // Solid Color - один цвет
 void mode_solid_color() {
   CRGB color = CRGB::White;
-  fill_solid(leds, ledState.numLeds, color);
+  fill_solid(frame, ledState.numLeds, color);
 }
 
 // Snowfall - падающий снег с мерцанием
@@ -270,7 +448,7 @@ void mode_snowfall() {
   static uint8_t snow[MAX_LEDS];
   static unsigned long lastUpdate = 0;
   
-  unsigned long now = millis();
+  unsigned long now = animMillis();  // виртуальные часы (общая скорость)
   
   // Обновление позиций снежинок
   if (now - lastUpdate >= fallSpeed) {
@@ -293,22 +471,20 @@ void mode_snowfall() {
   // Отрисовка снежинок с мерцанием
   for (int i = 0; i < ledState.numLeds; i++) {
     if (snow[i] > 0) {
-      // Мерцание: добавляем случайное изменение яркости
-      uint8_t twinkle = snow[i];
-      if (random8() < 60) {
-        twinkle = qadd8(twinkle, random8(20, 50));  // Вспышка
-      }
-      if (random8() < 40) {
-        twinkle = qsub8(twinkle, random8(10, 30));  // Приглушение
-      }
-      
+      // Мерцание — плавная синусоида вместо случайных скачков каждый кадр
+      // (раньше random8() на каждом кадре давал «дребезг» яркости).
+      // Значение snow[i] у снежинки постоянно, поэтому оно же служит её «семенем»:
+      // своя фаза мерцания и свой оттенок, которые не меняются при падении.
+      uint8_t seed = snow[i];
+      uint8_t wave = sin8((uint8_t)(animMillis() / 6) + seed * 11);
+      uint8_t twinkle = scale8(seed, 190 + scale8(wave, 65));  // 75%..100% яркости
+
       // Цвет снежинки: белый с лёгким голубым оттенком
-      // Hue 160-180 = голубой, низкая насыщенность = близко к белому
-      uint8_t hue = 160 + random8(20);      // Голубоватый оттенок
-      uint8_t sat = random8(0, 80);         // Низкая насыщенность (ближе к белому)
-      leds[i] = CHSV(hue, sat, twinkle);
+      uint8_t hue = 160 + (seed % 20);          // Голубоватый оттенок
+      uint8_t sat = (uint8_t)(seed * 7) % 80;   // Низкая насыщенность (ближе к белому)
+      frame[i] = CHSV(hue, sat, twinkle);
     } else {
-      leds[i] = CRGB::Black;
+      frame[i] = CRGB::Black;
     }
   }
 }
@@ -325,7 +501,8 @@ void mode_aurora() {
   
   // Speed контролирует скорость движения волн (1-10)
   uint8_t waveSpeed = map(speed, 0, 255, 1, 10);
-  auroraTime += waveSpeed;
+  static float auroraAcc = 0;
+  auroraTime += animSteps(auroraAcc, waveSpeed);
   
   // Медленное изменение базового оттенка для разнообразия
   if (random8() < 3) {
@@ -377,13 +554,10 @@ void mode_aurora() {
     // Насыщенность высокая, но с небольшой вариацией
     uint8_t saturation = 200 + (noise / 8);  // 200-231
     
-    // Добавляем случайные "вспышки" - характерная черта сияния
-    if (random8() < 5 && brightness > 100) {
-      brightness = qadd8(brightness, 50);  // Случайная вспышка
-      saturation = qsub8(saturation, 40);  // Вспышки чуть белее
-    }
+    // Случайные покадровые «вспышки» пикселей убраны: они выглядели как мерцание.
+    // Живость сиянию дают волны, шум и плавные «занавески» ниже.
     
-    leds[i] = CHSV(hue, saturation, brightness);
+    frame[i] = CHSV(hue, saturation, brightness);
   }
   
   // Добавляем редкие "занавески" - вертикальные полосы повышенной яркости
@@ -391,22 +565,24 @@ void mode_aurora() {
   static uint8_t curtainWidth = 5;
   static unsigned long lastCurtain = 0;
   
-  if (millis() - lastCurtain > 2000) {  // Новая занавеска каждые 2 секунды
+  uint32_t nowAnim = animMillis();
+  if (nowAnim - lastCurtain > 2000) {  // Новая занавеска каждые 2 секунды
     if (random8() < 30) {  // 12% шанс появления
       curtainPos = random8(ledState.numLeds);
       curtainWidth = random8(3, 10);
-      lastCurtain = millis();
+      lastCurtain = nowAnim;
     }
   }
   
   // Рисуем "занавеску" с затуханием
-  uint8_t curtainAge = (millis() - lastCurtain) / 10;
+  uint32_t curtainAgeMs = nowAnim - lastCurtain;
+  uint8_t curtainAge = curtainAgeMs > 2550 ? 255 : curtainAgeMs / 10;
   if (curtainAge < 100) {
     uint8_t curtainBright = 255 - curtainAge * 2;
     for (int j = 0; j < curtainWidth && (curtainPos + j) < ledState.numLeds; j++) {
       uint8_t fade = sin8(j * 128 / curtainWidth);  // Плавное затухание к краям
       uint8_t addBright = (curtainBright * fade) / 256;
-      leds[curtainPos + j] = leds[curtainPos + j].lerp8(CHSV(baseHue + 32, 180, 255), addBright);
+      frame[curtainPos + j] = frame[curtainPos + j].lerp8(CHSV(baseHue + 32, 180, 255), addBright);
     }
   }
 }
@@ -452,10 +628,10 @@ void mode_fireflies() {
   // Скорость обновления анимации (5-30ms)
   uint8_t updateInterval = map(speed, 0, 255, 30, 5);
   
-  unsigned long now = millis();
+  unsigned long now = animMillis();  // виртуальные часы (общая скорость)
   if (now - lastUpdate < updateInterval) {
     // Просто перерисовываем без обновления состояния
-    fill_solid(leds, ledState.numLeds, CRGB::Black);
+    fill_solid(frame, ledState.numLeds, CRGB::Black);
     for (int i = 0; i < maxFireflies; i++) {
       if (fireflies[i].phase > 0 && fireflies[i].pos < ledState.numLeds) {
         uint8_t brightness;
@@ -468,17 +644,17 @@ void mode_fireflies() {
           brightness = ease8InOutCubic((255 - fireflies[i].phase) * 2);
           brightness = (brightness * fireflies[i].maxBright) / 255;
         }
-        leds[fireflies[i].pos] = CHSV(fireflies[i].hue, fireflies[i].sat, brightness);
+        frame[fireflies[i].pos] = CHSV(fireflies[i].hue, fireflies[i].sat, brightness);
         
         // Добавляем легкое свечение на соседние пиксели (ореол)
         if (brightness > 50) {
           uint8_t glowBright = brightness / 3;  // Усилили ореол
           uint8_t glowSat = fireflies[i].sat > 50 ? fireflies[i].sat - 30 : 0;
           if (fireflies[i].pos > 0) {
-            leds[fireflies[i].pos - 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
+            frame[fireflies[i].pos - 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
           }
           if (fireflies[i].pos < ledState.numLeds - 1) {
-            leds[fireflies[i].pos + 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
+            frame[fireflies[i].pos + 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
           }
         }
       }
@@ -488,7 +664,7 @@ void mode_fireflies() {
   lastUpdate = now;
   
   // Очищаем ленту
-  fill_solid(leds, ledState.numLeds, CRGB::Black);
+  fill_solid(frame, ledState.numLeds, CRGB::Black);
   
   // Обновляем состояние каждого светлячка
   for (int i = 0; i < maxFireflies; i++) {
@@ -525,17 +701,17 @@ void mode_fireflies() {
         }
         
         // Основная точка светлячка
-        leds[fireflies[i].pos] = CHSV(fireflies[i].hue, fireflies[i].sat, brightness);
+        frame[fireflies[i].pos] = CHSV(fireflies[i].hue, fireflies[i].sat, brightness);
         
         // Ореол свечения на соседних пикселях для магического эффекта
         if (brightness > 50) {
           uint8_t glowBright = brightness / 3;  // Усилили ореол
           uint8_t glowSat = fireflies[i].sat > 50 ? fireflies[i].sat - 30 : 0;
           if (fireflies[i].pos > 0) {
-            leds[fireflies[i].pos - 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
+            frame[fireflies[i].pos - 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
           }
           if (fireflies[i].pos < ledState.numLeds - 1) {
-            leds[fireflies[i].pos + 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
+            frame[fireflies[i].pos + 1] += CHSV(fireflies[i].hue, glowSat, glowBright);
           }
         }
       }
@@ -583,12 +759,12 @@ void mode_fireflies() {
           uint16_t pos = fireflies[i].pos;
           if (pos < ledState.numLeds) {
             // Яркая белая вспышка с цветным ядром
-            leds[pos] = CHSV(fireflies[i].hue, fireflies[i].sat, 255);
+            frame[pos] = CHSV(fireflies[i].hue, fireflies[i].sat, 255);
             // Расширенный белый ореол при вспышке
-            if (pos > 0) leds[pos - 1] = CHSV(fireflies[i].hue, fireflies[i].sat / 2, 180);
-            if (pos > 1) leds[pos - 2] += CHSV(fireflies[i].hue, fireflies[i].sat / 3, 90);
-            if (pos < ledState.numLeds - 1) leds[pos + 1] = CHSV(fireflies[i].hue, fireflies[i].sat / 2, 180);
-            if (pos < ledState.numLeds - 2) leds[pos + 2] += CHSV(fireflies[i].hue, fireflies[i].sat / 3, 90);
+            if (pos > 0) frame[pos - 1] = CHSV(fireflies[i].hue, fireflies[i].sat / 2, 180);
+            if (pos > 1) frame[pos - 2] += CHSV(fireflies[i].hue, fireflies[i].sat / 3, 90);
+            if (pos < ledState.numLeds - 1) frame[pos + 1] = CHSV(fireflies[i].hue, fireflies[i].sat / 2, 180);
+            if (pos < ledState.numLeds - 2) frame[pos + 2] += CHSV(fireflies[i].hue, fireflies[i].sat / 3, 90);
           }
           lastFlash = now;
           break;
@@ -752,7 +928,7 @@ CRGB getBacklightColor() {
 void runBacklightMode(uint8_t mode) {
   if (!ledState.power) {
     // Только гасим буфер; вывод кадра централизован в main.cpp
-    fill_solid(leds, ledState.numLeds, CRGB::Black);
+    fill_solid(frame, ledState.numLeds, CRGB::Black);
     return;
   }
   
@@ -781,8 +957,8 @@ void backlight_waves() {
   
   for (int i = 0; i < ledState.numLeds; i++) {
     // Генерируем волну яркости
-    uint8_t wave1 = beatsin8(waveBPM, minBright, 255, 0, i * waveCount * 3);
-    uint8_t wave2 = beatsin8(waveBPM * 0.7, 0, 40, 0, i * waveCount * 5 + 64);
+    uint8_t wave1 = beatsin8(waveBPM, minBright, 255, animTimebase(), i * waveCount * 3);
+    uint8_t wave2 = beatsin8(waveBPM * 0.7, 0, 40, animTimebase(), i * waveCount * 5 + 64);
     
     // Комбинируем - wave1 основная, wave2 добавляет вариацию
     uint8_t brightness = qadd8(wave1, wave2 / 4);
@@ -790,9 +966,9 @@ void backlight_waves() {
     
     // Применяем яркость к оригинальному цвету через масштабирование RGB
     // Это сохраняет насыщенность цвета!
-    leds[i].r = scale8(baseColor.r, brightness);
-    leds[i].g = scale8(baseColor.g, brightness);
-    leds[i].b = scale8(baseColor.b, brightness);
+    frame[i].r = scale8(baseColor.r, brightness);
+    frame[i].g = scale8(baseColor.g, brightness);
+    frame[i].b = scale8(baseColor.b, brightness);
   }
 }
 
@@ -813,23 +989,23 @@ void backlight_pulse() {
   uint8_t minBright = map(intensity, 0, 255, 180, 30);
   
   // Главная пульсация
-  uint8_t mainPulse = beatsin8(pulseBPM, minBright, 255);
+  uint8_t mainPulse = beatsin8(pulseBPM, minBright, 255, animTimebase());
   
   // Добавляем вторичную пульсацию для более органичного эффекта
-  uint8_t secondPulse = beatsin8(pulseBPM * 1.3, 0, 20);
+  uint8_t secondPulse = beatsin8(pulseBPM * 1.3, 0, 20, animTimebase());
   
   uint8_t brightness = qadd8(mainPulse, secondPulse / 4);
   if (brightness > 255) brightness = 255;
   
   for (int i = 0; i < ledState.numLeds; i++) {
     // Небольшое смещение яркости по позиции для "живости"
-    uint8_t posOffset = sin8(i * 3 + millis() / 100) / 64;  // 0-4
+    uint8_t posOffset = sin8(i * 3 + animMillis() / 100) / 64;  // 0-4
     uint8_t pixelBright = qadd8(brightness, posOffset);
     if (pixelBright > 255) pixelBright = 255;
     
     // Применяем яркость к оригинальному RGB цвету - сохраняет насыщенность!
-    leds[i].r = scale8(baseColor.r, pixelBright);
-    leds[i].g = scale8(baseColor.g, pixelBright);
-    leds[i].b = scale8(baseColor.b, pixelBright);
+    frame[i].r = scale8(baseColor.r, pixelBright);
+    frame[i].g = scale8(baseColor.g, pixelBright);
+    frame[i].b = scale8(baseColor.b, pixelBright);
   }
 }

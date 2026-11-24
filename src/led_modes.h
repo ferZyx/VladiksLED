@@ -12,6 +12,17 @@ void initLEDs();
 // Сузить вывод FastLED до ledState.numLeds (вызывать при изменении числа LED)
 void syncLedCount();
 
+// Продвинуть виртуальные часы анимации (раз за кадр, до эффекта).
+// speedPercent — общая скорость режима работы, 100 = родная скорость эффектов
+void advanceAnimationClock(uint8_t speedPercent);
+
+// Перенести кадр эффекта в выходной буфер leds[] со сглаживанием.
+// Возвращает true, если выходной буфер изменился и кадр стоит показать
+bool presentFrame();
+
+// Залить кадр эффекта одним цветом (для служебных состояний вне эффектов)
+void fillFrameSolid(const CRGB& color);
+
 // Запуск режима гирлянды
 void runMode(uint8_t mode);
 

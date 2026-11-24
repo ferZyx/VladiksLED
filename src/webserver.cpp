@@ -134,6 +134,9 @@ void setupWebServer() {
   server.on("/api/schedules", HTTP_POST, 
     onBodyRequestDone, 
     NULL, handleSetSchedule);
+  server.on("/api/animation", HTTP_POST, 
+    onBodyRequestDone, 
+    NULL, handleSetAnimation);
   server.on("/api/time/set", HTTP_POST, 
     onBodyRequestDone, 
     NULL, handleSetTime);
@@ -191,6 +194,8 @@ void handleGetState(AsyncWebServerRequest *request) {
   response->printf("\"autoSwitchDelay\":%u,", (unsigned)ledState.autoSwitchDelay);
   response->printf("\"randomOrder\":%s,", ledState.randomOrder ? "true" : "false");
   response->printf("\"operationMode\":%d,", (uint8_t)ledState.operationMode);
+  response->printf("\"garlandSpeed\":%u,\"backlightSpeed\":%u,\"garlandSmoothing\":%u,",
+    ledState.garlandSpeed, ledState.backlightSpeed, ledState.garlandSmoothing);
   
   // Настройки режимов гирлянды
   response->print("\"modeSettings\":[");
@@ -937,6 +942,37 @@ void handleSetBacklightAutoSwitch(AsyncWebServerRequest *request, uint8_t *data,
   LOG_PRINTF("API: Backlight auto-switch updated: modeDelay=%d, colorDelay=%d\n", 
              ledState.backlight.modeAutoSwitchDelay, 
              ledState.backlight.colorAutoSwitchDelay);
+  settingsChanged = true;
+  request->send(200, "application/json", "{\"success\":true}");
+}
+
+/**
+ * POST /api/animation — общие настройки анимации.
+ * Тело (все поля необязательны): {"garlandSpeed":10..250, "backlightSpeed":10..250,
+ * "garlandSmoothing":0..255}. Скорость — в процентах от родной скорости эффектов.
+ */
+void handleSetAnimation(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  // Тело может прийти несколькими чанками — обрабатываем только полностью полученное
+  if (index + len != total) return;
+
+  StaticJsonDocument<128> doc;
+  if (deserializeJson(doc, (const char*)data, len)) {
+    request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+
+  if (doc.containsKey("garlandSpeed")) {
+    ledState.garlandSpeed = constrain((int)doc["garlandSpeed"], ANIM_SPEED_MIN, ANIM_SPEED_MAX);
+  }
+  if (doc.containsKey("backlightSpeed")) {
+    ledState.backlightSpeed = constrain((int)doc["backlightSpeed"], ANIM_SPEED_MIN, ANIM_SPEED_MAX);
+  }
+  if (doc.containsKey("garlandSmoothing")) {
+    ledState.garlandSmoothing = constrain((int)doc["garlandSmoothing"], 0, 255);
+  }
+
+  LOG_PRINTF("API: Animation speed G=%u%% B=%u%% smooth=%u\n",
+             ledState.garlandSpeed, ledState.backlightSpeed, ledState.garlandSmoothing);
   settingsChanged = true;
   request->send(200, "application/json", "{\"success\":true}");
 }
