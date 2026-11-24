@@ -19,7 +19,7 @@ description: Сборка и OTA-деплой прошивки VladiksLED на E
    ```bash
    .claude/skills/deploy/deploy.sh
    ```
-   Скрипт: собирает → печатает RAM/Flash и число предупреждений → проверяет, что устройство отвечает по HTTP → шьёт через espota → ждёт перезагрузки → печатает `uptimeMs`, `timeValid`, `freeHeap` и др. из `/api/debug`.
+   Скрипт: собирает → печатает RAM/Flash и число предупреждений → проверяет, что устройство отвечает по HTTP → сжимает `firmware.bin` gzip'ом (ядро 3.x распаковывает сам, ~−35% трафика) и шлёт напрямую через `espota.py` (без повторного `pio run -t upload`) → ждёт, пока `uptimeMs` станет меньше, чем до заливки (espota отвечает OK раньше ребута) → печатает `uptimeMs`, `timeValid`, `freeHeap` и др. из `/api/debug`.
    - Только сборка: `.claude/skills/deploy/deploy.sh --build`
    - Только проверка живого устройства: `.claude/skills/deploy/deploy.sh --verify`
 4. **Отчёт пользователю:** размеры RAM/Flash (сравнить с базой в памяти Serena `code_style_and_conventions`), результат OTA, маленький `uptimeMs` как доказательство перезагрузки, `timeValid`, `freeHeap`. Если что-то не проверено — сказать прямо.

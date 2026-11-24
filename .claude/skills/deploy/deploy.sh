@@ -50,34 +50,51 @@ build() {
   echo "⚠️  Предупреждений компилятора: ${warns:-0}"
 }
 
-# Заливка по OTA; перед этим убеждаемся, что устройство в сети
+# Текущий uptime устройства в мс (пусто, если не отвечает)
+device_uptime() {
+  curl -s -m 3 "http://$DEVICE_IP/api/debug" | sed -nE 's/.*"uptimeMs":([0-9]+).*/\1/p'
+}
+
+# Заливка по OTA; перед этим убеждаемся, что устройство в сети.
+# Шлём gzip-образ напрямую через espota.py: ядро ESP8266 3.x само распаковывает
+# сжатую прошивку (≈−35% трафика), а прямой вызов не перезапускает сборку,
+# как это делает `pio run -t upload`.
+UPTIME_BEFORE=""
 upload() {
   echo "📡 Проверка доступности $DEVICE_IP..."
-  if ! curl -s -m 4 -o /dev/null "http://$DEVICE_IP/"; then
+  UPTIME_BEFORE="$(device_uptime || true)"
+  if [[ -z "$UPTIME_BEFORE" ]]; then
     echo "❌ Устройство $DEVICE_IP не отвечает по HTTP — OTA невозможна" >&2
     exit 1
   fi
-  echo "⬆️  OTA-заливка..."
-  if ! "$PIO" run -e "$ENV_NAME" -t upload > temp/deploy-upload.log 2>&1; then
+  local bin=".pio/build/$ENV_NAME/firmware.bin"
+  local espota="$HOME/.platformio/packages/framework-arduinoespressif8266/tools/espota.py"
+  gzip -9 -c "$bin" > "$bin.gz"
+  echo "⬆️  OTA-заливка ($(( $(wc -c < "$bin.gz") / 1024 )) КБ gzip из $(( $(wc -c < "$bin") / 1024 )) КБ)..."
+  if ! python3 "$espota" -i "$DEVICE_IP" -p 8266 -f "$bin.gz" -r > temp/deploy-upload.log 2>&1; then
     grep -E "ERROR|Error" temp/deploy-upload.log | tail -5 || true
     echo "❌ OTA не удалась, лог: temp/deploy-upload.log" >&2
     echo "   'No Answer' при живом HTTP почти всегда = песочница/файрвол блокирует UDP 8266." >&2
     exit 1
   fi
-  grep -E "Result:" temp/deploy-upload.log || true
+  echo "✅ Образ принят устройством"
 }
 
-# Ждём перезагрузки и печатаем ключевые поля /api/debug
+# Ждём перезагрузки и печатаем ключевые поля /api/debug.
+# После upload ждём, пока uptime станет меньше, чем был до заливки: espota
+# возвращает OK раньше, чем плата уходит в ребут, и старая прошивка ещё отвечает.
 verify() {
   echo "🔎 Ожидание устройства после перезагрузки..."
-  local resp=""
-  for _ in $(seq 1 20); do
-    resp="$(curl -s -m 3 "http://$DEVICE_IP/api/debug" || true)"
-    [[ "$resp" == *'"uptimeMs"'* ]] && break
-    sleep 3
+  local resp="" up=""
+  for _ in $(seq 1 40); do
+    resp="$(curl -s -m 2 "http://$DEVICE_IP/api/debug" || true)"
+    up="$(echo "$resp" | sed -nE 's/.*"uptimeMs":([0-9]+).*/\1/p')"
+    if [[ -n "$up" && ( -z "$UPTIME_BEFORE" || "$up" -lt "$UPTIME_BEFORE" ) ]]; then break; fi
+    up=""
+    sleep 1.5
   done
-  if [[ "$resp" != *'"uptimeMs"'* ]]; then
-    echo "❌ Устройство не ответило на /api/debug за ~60 с" >&2
+  if [[ -z "$up" ]]; then
+    echo "❌ Устройство не поднялось с новой прошивкой за ~60 с" >&2
     exit 1
   fi
   # Компактный вывод полей без зависимостей (jq может отсутствовать)
