@@ -13,3 +13,8 @@
 .DS_Store
 Thumbs.db
 referenses/
+
+# Локальные MCP-конфиги (абсолютные пути машины)
+/.mcp.json
+/.codex/*
+!/.codex/*.example

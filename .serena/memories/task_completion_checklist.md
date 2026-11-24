@@ -1,1 +1,3 @@
 After code changes: run pio run -e d1_mini as primary verification. If build cache issues appear, run clean rebuild command. Verify no credential/network-only edits in src/config.h are accidentally included. Ensure settings persistence pattern is respected (settingsChanged flag, no direct saveLEDState in handlers).
+
+Session-end rule (CLAUDE.md): before finishing any session with file changes — update Serena memories, commit code + .serena/memories together (excluding credential-only src/config.h edits and temp/), then git push to the current branch. On commit/push failure do not force; report what is left unpushed.
